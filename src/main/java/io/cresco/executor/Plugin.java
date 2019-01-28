@@ -68,6 +68,8 @@ public class Plugin implements PluginService {
         try {
             pluginBuilder = new PluginBuilder(this.getClass().getName(), context, map);
             this.logger = pluginBuilder.getLogger(Plugin.class.getName(), CLogger.Level.Info);
+            this.runnerEngine = new RunnerEngine(pluginBuilder);
+
             this.executor = new ExecutorImpl(pluginBuilder, runnerEngine);
             pluginBuilder.setExecutor(executor);
 
