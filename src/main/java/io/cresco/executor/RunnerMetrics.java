@@ -17,12 +17,14 @@ public class RunnerMetrics extends Thread {
     private CLogger logger;
     private String command;
     private Gson gson;
+    private String streamName;
 
 
-    RunnerMetrics(PluginBuilder plugin, String command) {
+    public RunnerMetrics(PluginBuilder plugin, String command, String streamName) {
         this.plugin = plugin;
         logger = plugin.getLogger(RunnerMetrics.class.getName(),CLogger.Level.Info);
 
+        this.streamName = streamName;
         this.command = command;
         this.gson = new Gson();
     }
@@ -106,11 +108,18 @@ public class RunnerMetrics extends Thread {
                         metricList.add(getMetric("virtual.size",String.valueOf(virtualSize)));
 
                         Map<String,List<Map<String,String>>> info = new HashMap<>();
-                        info.put("runner",metricList);
+                        info.put("runner-" + streamName,metricList);
+
+                        Map<String,String> metricsMap = new HashMap<>();
+                        metricsMap.put("name","executor");
+                        metricsMap.put("metrics",gson.toJson(info));
+
+                        List<Map<String,String>> metricsList = new ArrayList<>();
+                        metricsList.add(metricsMap);
 
 
                         MapMessage mapMessage = plugin.getAgentService().getDataPlaneService().createMapMessage();
-                        mapMessage.setString("perf",gson.toJson(info));
+                        mapMessage.setString("perf",gson.toJson(metricsList));
 
                         //set property
                         mapMessage.setStringProperty("pluginname",plugin.getConfig().getStringParam("pluginname"));

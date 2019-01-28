@@ -49,7 +49,7 @@ public class Runner implements Runnable {
 
 
             logger.trace("Starting Metric Collection");
-            RunnerMetrics runnerMetrics = new RunnerMetrics(plugin, command);
+            RunnerMetrics runnerMetrics = new RunnerMetrics(plugin, command, streamName);
             new Thread(runnerMetrics).start();
             //runnerMetrics.start();
 

@@ -80,6 +80,16 @@ public class Plugin implements PluginService {
 
             pluginBuilder.setIsActive(true);
 
+            String stream_name = pluginBuilder.getConfig().getStringParam("stream_name");
+            String command = pluginBuilder.getConfig().getStringParam("command");
+
+
+            if((stream_name != null) && (command != null)) {
+                logger.info("Local Config Found.  Starting runner");
+                runnerEngine.createRunner(command,stream_name,true);
+                runnerEngine.runRunner(stream_name);
+            }
+
             //send a bunch of messages
             //MessageSender messageSender = new MessageSender(pluginBuilder);
             //new Thread(messageSender).start();
