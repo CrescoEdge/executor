@@ -1,6 +1,5 @@
 package io.cresco.executor;
 
-
 import io.cresco.library.data.TopicType;
 import io.cresco.library.plugin.PluginBuilder;
 import io.cresco.library.utilities.CLogger;
@@ -91,7 +90,7 @@ public class Runner implements Runnable {
             mapMessage.setString("ts", Long.toString(new Date().getTime()));
 
             plugin.getAgentService().getDataPlaneService().sendMessage(TopicType.AGENT,mapMessage);
-            
+
         } catch (Exception e) {
             e.printStackTrace();
         }

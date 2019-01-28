@@ -28,6 +28,7 @@ public class Plugin implements PluginService {
     private CLogger logger;
     private Map<String, Object> map;
     public String myname;
+    public RunnerEngine runnerEngine;
 
     @Activate
     void activate(BundleContext context, Map<String, Object> map) {
@@ -67,7 +68,7 @@ public class Plugin implements PluginService {
         try {
             pluginBuilder = new PluginBuilder(this.getClass().getName(), context, map);
             this.logger = pluginBuilder.getLogger(Plugin.class.getName(), CLogger.Level.Info);
-            this.executor = new ExecutorImpl(pluginBuilder);
+            this.executor = new ExecutorImpl(pluginBuilder, runnerEngine);
             pluginBuilder.setExecutor(executor);
 
             while (!pluginBuilder.getAgentService().getAgentState().isActive()) {
