@@ -12,70 +12,86 @@ public class ExecutorImpl implements Executor {
     private PluginBuilder plugin;
     private CLogger logger;
     private RunnerEngine runnerEngine;
-    private Runner runner;
-    private String runCommmand;
+
 
     public ExecutorImpl(PluginBuilder pluginBuilder, RunnerEngine runnerEngine) {
         this.plugin = pluginBuilder;
         logger = plugin.getLogger(ExecutorImpl.class.getName(),CLogger.Level.Info);
         this.runnerEngine = runnerEngine;
-        runCommmand = plugin.getConfig().getStringParam("runCommand");
+
     }
 
     @Override
     public MsgEvent executeCONFIG(MsgEvent incoming) {
 
-        switch (incoming.getParam("action")) {
-            case "run_process":
-                logger.info("{} cmd received", incoming.getParam("cmd"));
-                if (runner != null) {
-                    if(runner.isRunning()) {
-                        logger.error("Trying to run, but runner != null, STOP first.");
-                        incoming.setParam("error", Boolean.toString(true));
-                        incoming.setParam("error_msg", "Process is already running");
-                        return incoming;
-                    }
-                    runner = null;
-                }
+        String streamName = incoming.getParam("stream_name");
 
-                if(runCommmand != null) {
-                    //if(incoming.getParam("command") != null) {
-                    String streamName = UUID.randomUUID().toString();
-                    runner = new Runner(plugin, incoming.getParam("command"), streamName);
-                    new Thread(runner).start();
-                    //todo do some status here
-                    incoming.setParam("status", Boolean.toString(true));
-                    incoming.setParam("stream_name", streamName);
+        switch (incoming.getParam("action")) {
+            case "config_process":
+                logger.info("{} cmd received", incoming.getParam("cmd"));
+
+                if(streamName != null) {
+                    if(runnerEngine.isRunner(streamName)) {
+                            logger.error("Trying to create runner, but runner != null, STOP first.");
+                            incoming.setParam("error", Boolean.toString(true));
+                            incoming.setParam("error_msg", "Runner already exist stream_name: " + streamName);
+                            incoming.setParam("status", Boolean.toString(false));
+                    } else {
+                        if(incoming.getParam("command") != null) {
+                            runnerEngine.createRunner(incoming.getParam("command"),streamName,true);
+                            incoming.setParam("status", Boolean.toString(false));
+                        } else {
+                            logger.error("Must provide command");
+                            incoming.setParam("error", Boolean.toString(true));
+                            incoming.setParam("error_msg", "Runner already exist stream_name: " + streamName);
+                            incoming.setParam("status", Boolean.toString(false));
+                        }
+                    }
+                } else {
+                    logger.error("Must provide stream_name");
+                    incoming.setParam("error", Boolean.toString(true));
+                    incoming.setParam("error_msg", "Runner already exist stream_name: " + streamName);
+                    incoming.setParam("status", Boolean.toString(false));
                 }
 
                 return incoming;
+
+
             case "status_process":
                 logger.trace("{} cmd received", incoming.getParam("cmd"));
-                if (runner == null || !runner.isRunning()) {
-                    incoming.setParam("status_runner", Boolean.toString(runner == null));
-                    if (runner == null)
-                        incoming.setParam("status_process", Boolean.toString(false));
-                    else
-                        incoming.setParam("status_process", Boolean.toString(runner.isRunning()));
-                } else
-                    incoming.setParam("status", Boolean.toString(true));
+
+                if(streamName != null) {
+                    if (runnerEngine.isRunner(streamName)) {
+                        incoming.setParam("status_runner", Boolean.toString(runnerEngine.isRunning(streamName)));
+                    } else {
+                        incoming.setParam("error_msg", "stream_name: " + streamName + " not found.");
+                        incoming.setParam("status_runner", Boolean.toString(false));
+                    }
+                } else {
+                    incoming.setParam("error_msg", "stream_name = null");
+                    incoming.setParam("status_runner", Boolean.toString(false));
+                }
+
                 return incoming;
+
             case "end_process":
                 logger.trace("{} cmd received", incoming.getParam("cmd"));
-                if (runner == null || !runner.isRunning()) {
-                    incoming.setParam("error", Boolean.toString(true));
-                    if (runner == null)
-                        incoming.setParam("error_msg", "Process is not currently running");
-                    else
-                        incoming.setParam("error_msg", "Process could not be run");
-                    return incoming;
-                }
-                runner.shutdown();
-                runner = null;
 
-                incoming.setParam("status", Boolean.toString(true));
+
+                if(streamName != null) {
+                    if (runnerEngine.isRunner(streamName)) {
+                        incoming.setParam("status_runner", Boolean.toString(runnerEngine.stopRunner(streamName)));
+                    } else {
+                        incoming.setParam("error_msg", "stream_name: " + streamName + " not found.");
+                        incoming.setParam("status_runner", Boolean.toString(false));
+                    }
+                } else {
+                    incoming.setParam("error_msg", "stream_name = null");
+                    incoming.setParam("status_runner", Boolean.toString(false));
+                }
 
                 return incoming;
+
             default:
                 logger.error("Unknown action: {}", incoming.getParam("action"));
                 incoming.setParam("error", Boolean.toString(true));
@@ -97,56 +113,25 @@ public class ExecutorImpl implements Executor {
     @Override
     public MsgEvent executeEXEC(MsgEvent incoming) {
 
+        String streamName = incoming.getParam("stream_name");
+
         switch (incoming.getParam("action")) {
             case "run_process":
-                logger.info("{} action received", incoming.getParam("action"));
-                if (runner != null) {
-                    if(runner.isRunning()) {
-                        logger.error("Trying to run, but runner != null, STOP first.");
-                        incoming.setParam("error", Boolean.toString(true));
-                        incoming.setParam("error_msg", "Process is already running");
-                        return incoming;
+                logger.info("{} cmd received", incoming.getParam("cmd"));
+
+                if(streamName != null) {
+                    if(runnerEngine.isRunner(streamName)) {
+                        if(runnerEngine.isRunning(streamName)) {
+                            logger.error("Trying to run, but runner != null, STOP first.");
+                            incoming.setParam("error", Boolean.toString(true));
+                            incoming.setParam("error_msg", "Process is already running");
+                            incoming.setParam("status", Boolean.toString(false));
+                        } else {
+                            runnerEngine.runRunner(streamName);
+                            incoming.setParam("status", Boolean.toString(true));
+                        }
                     }
-                    runner = null;
                 }
-
-                if(runCommmand != null) {
-                    //if(incoming.getParam("command") != null) {
-                    String streamName = UUID.randomUUID().toString();
-                    runner = new Runner(plugin, incoming.getParam("command"), streamName);
-                    new Thread(runner).start();
-                    //todo do some status here
-                    incoming.setParam("status", Boolean.toString(true));
-                    incoming.setParam("stream_name", streamName);
-                }
-
-                return incoming;
-            case "status_process":
-                logger.trace("{} cmd received", incoming.getParam("cmd"));
-                if (runner == null || !runner.isRunning()) {
-                    incoming.setParam("status_runner", Boolean.toString(runner == null));
-                    if (runner == null)
-                        incoming.setParam("status_process", Boolean.toString(false));
-                    else
-                        incoming.setParam("status_process", Boolean.toString(runner.isRunning()));
-                } else
-                    incoming.setParam("status", Boolean.toString(true));
-                return incoming;
-            case "end_process":
-                logger.trace("{} cmd received", incoming.getParam("cmd"));
-                if (runner == null || !runner.isRunning()) {
-                    incoming.setParam("error", Boolean.toString(true));
-                    if (runner == null)
-                        incoming.setParam("error_msg", "Process is not currently running");
-                    else
-                        incoming.setParam("error_msg", "Process could not be run");
-                    return incoming;
-                }
-                runner.shutdown();
-                runner = null;
-
-                incoming.setParam("status", Boolean.toString(true));
-
                 return incoming;
             default:
                 logger.error("Unknown cmd: {}", incoming.getParam("cmd"));
