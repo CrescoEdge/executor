@@ -9,27 +9,28 @@ import oshi.software.os.OSProcess;
 import oshi.software.os.OperatingSystem;
 
 import javax.jms.MapMessage;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
-public class RunnerMetrics extends Thread {
+public class RunnerMetric {
     private PluginBuilder plugin;
     private CLogger logger;
     private String command;
     private Gson gson;
 
 
-    RunnerMetrics(PluginBuilder plugin, String command) {
+    RunnerMetric(PluginBuilder plugin, String command) {
         this.plugin = plugin;
-        logger = plugin.getLogger(RunnerMetrics.class.getName(),CLogger.Level.Info);
+        logger = plugin.getLogger(RunnerMetric.class.getName(),CLogger.Level.Info);
 
         this.command = command;
         this.gson = new Gson();
     }
 
 
-
-    @Override
-    public void run() {
+    public void getMetric() {
         try {
 
             List<Integer> processList = new ArrayList<>();
@@ -63,7 +64,7 @@ public class RunnerMetrics extends Thread {
 
             if(rootProcessId != -1) {
                 OSProcess rootOp = os.getProcess(rootProcessId);
-                while (!os.getProcess(rootProcessId).getState().equals(State.TERMINATED)) {
+                while (!os.getProcess(rootProcessId).getState().equals(Thread.State.TERMINATED)) {
 
                     long processCount = 0;
                     long bytesRead = 0;
@@ -81,7 +82,7 @@ public class RunnerMetrics extends Thread {
                             processList.add(op.getProcessID());
                         }
 
-                        if((processList.contains(op.getProcessID())) && (!op.getState().equals(State.TERMINATED))) {
+                        if((processList.contains(op.getProcessID())) && (!op.getState().equals(Thread.State.TERMINATED))) {
 
                             processCount++;
                             bytesRead += op.getBytesRead();
@@ -93,7 +94,7 @@ public class RunnerMetrics extends Thread {
                         }
                     }
 
-                    if(processCount > 0) {
+                    //if(processCount > 0) {
 
                         List<Map<String,String>> metricList = new ArrayList<>();
                         metricList.add(getMetric("process.count",String.valueOf(processCount)));
@@ -139,9 +140,7 @@ public class RunnerMetrics extends Thread {
                         }
                         */
 
-                    }
-
-                    Thread.sleep(5000);
+                    //}
                 }
             }
 

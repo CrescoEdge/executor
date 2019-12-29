@@ -16,7 +16,6 @@ import java.util.Map;
         service = { PluginService.class },
         scope=ServiceScope.PROTOTYPE,
         configurationPolicy = ConfigurationPolicy.REQUIRE,
-        servicefactory = true,
         reference=@Reference(name="io.cresco.library.agent.AgentService", service=AgentService.class)
 )
 
@@ -37,6 +36,16 @@ public class Plugin implements PluginService {
         this.map = map;
         myname = "this is my name";
 
+    }
+
+    @Override
+    public boolean isActive() {
+        return pluginBuilder.isActive();
+    }
+
+    @Override
+    public void setIsActive(boolean isActive) {
+        pluginBuilder.setIsActive(isActive);
     }
 
 

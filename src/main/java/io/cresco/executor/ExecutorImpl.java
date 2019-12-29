@@ -12,14 +12,14 @@ public class ExecutorImpl implements Executor {
     private PluginBuilder plugin;
     private CLogger logger;
     private RunnerEngine runnerEngine;
-
+    private Runner runner;
+    private String runCommmand;
 
     public ExecutorImpl(PluginBuilder pluginBuilder, RunnerEngine runnerEngine) {
         this.plugin = pluginBuilder;
         logger = plugin.getLogger(ExecutorImpl.class.getName(),CLogger.Level.Info);
-        runnerEngine = runnerEngine;
-        //runCommmand = plugin.getConfig().getStringParam("runCommand");
-
+        this.runnerEngine = runnerEngine;
+        runCommmand = plugin.getConfig().getStringParam("runCommand");
     }
 
     @Override
