@@ -92,11 +92,11 @@ public class Plugin implements PluginService {
 
             String stream_name = pluginBuilder.getConfig().getStringParam("stream_name");
             String command = pluginBuilder.getConfig().getStringParam("command");
-
+            boolean metrics = pluginBuilder.getConfig().getBooleanParam("metrics",false);
 
             if((stream_name != null) && (command != null)) {
                 logger.info("Local Config Found.  Starting runner");
-                runnerEngine.createRunner(command,stream_name,true);
+                runnerEngine.createRunner(command,stream_name,true, metrics);
                 runnerEngine.runRunner(stream_name);
             }
 

@@ -16,14 +16,16 @@ public class Runner implements Runnable {
     private String streamName;
     private boolean running = false;
     private boolean complete = false;
+    private boolean metrics = false;
 
-    public Runner(PluginBuilder plugin, String command, String streamName) {
+    public Runner(PluginBuilder plugin, String command, String streamName, boolean metrics) {
 
         this.plugin = plugin;
         logger = plugin.getLogger(ExecutorImpl.class.getName(),CLogger.Level.Info);
 
         this.command = command;
         this.streamName = streamName;
+        this.metrics = metrics;
     }
 
     @Override
@@ -47,15 +49,16 @@ public class Runner implements Runnable {
             logger.trace("Starting Process");
             Process p = pb.start();
 
-
-            logger.trace("Starting Metric Collection");
-            RunnerMetrics runnerMetrics = new RunnerMetrics(plugin, command, streamName);
-            new Thread(runnerMetrics).start();
-            //runnerMetrics.start();
+            if(metrics) {
+                logger.trace("Starting Metric Collection");
+                RunnerMetrics runnerMetrics = new RunnerMetrics(plugin, command, streamName);
+                new Thread(runnerMetrics).start();
+                //runnerMetrics.start();
+            }
 
             logger.trace("Starting Output Forwarders");
-            StreamGobbler errorGobbler = new StreamGobbler(plugin, p.getErrorStream(), streamName);
-            StreamGobbler outputGobbler = new StreamGobbler(plugin, p.getInputStream(), streamName);
+            StreamGobbler errorGobbler = new StreamGobbler(plugin, p.getErrorStream(), streamName, "error");
+            StreamGobbler outputGobbler = new StreamGobbler(plugin, p.getInputStream(), streamName, "output");
 
             errorGobbler.start();
             outputGobbler.start();

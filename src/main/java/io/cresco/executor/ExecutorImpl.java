@@ -28,66 +28,84 @@ public class ExecutorImpl implements Executor {
 
         switch (incoming.getParam("action")) {
             case "config_process":
-                logger.info("{} cmd received", incoming.getParam("cmd"));
+                logger.info("{} command received", incoming.getParam("command"));
 
                 if(streamName != null) {
                     if(runnerEngine.isRunner(streamName)) {
                             logger.error("Trying to create runner, but runner != null, STOP first.");
                             incoming.setParam("error", Boolean.toString(true));
                             incoming.setParam("error_msg", "Runner already exist stream_name: " + streamName);
-                            incoming.setParam("status", Boolean.toString(false));
+                            incoming.setParam("config_status", Boolean.toString(false));
                     } else {
                         if(incoming.getParam("command") != null) {
-                            runnerEngine.createRunner(incoming.getParam("command"),streamName,true);
-                            incoming.setParam("status", Boolean.toString(false));
+                            if(incoming.getParam("metrics") != null) {
+                                runnerEngine.createRunner(incoming.getParam("command"),streamName,true, Boolean.getBoolean(incoming.getParam("metrics")));
+                            } else {
+                                runnerEngine.createRunner(incoming.getParam("command"),streamName,true,false);
+                            }
+                            incoming.setParam("config_status", Boolean.toString(true));
                         } else {
                             logger.error("Must provide command");
                             incoming.setParam("error", Boolean.toString(true));
                             incoming.setParam("error_msg", "Runner already exist stream_name: " + streamName);
-                            incoming.setParam("status", Boolean.toString(false));
+                            incoming.setParam("config_status", Boolean.toString(false));
                         }
                     }
                 } else {
                     logger.error("Must provide stream_name");
                     incoming.setParam("error", Boolean.toString(true));
                     incoming.setParam("error_msg", "Runner already exist stream_name: " + streamName);
-                    incoming.setParam("status", Boolean.toString(false));
+                    incoming.setParam("config_status", Boolean.toString(false));
                 }
 
                 return incoming;
 
 
             case "status_process":
-                logger.trace("{} cmd received", incoming.getParam("cmd"));
 
                 if(streamName != null) {
                     if (runnerEngine.isRunner(streamName)) {
-                        incoming.setParam("status_runner", Boolean.toString(runnerEngine.isRunning(streamName)));
+                        incoming.setParam("run_status", Boolean.toString(runnerEngine.isRunning(streamName)));
                     } else {
                         incoming.setParam("error_msg", "stream_name: " + streamName + " not found.");
-                        incoming.setParam("status_runner", Boolean.toString(false));
+                        incoming.setParam("run_status", Boolean.toString(false));
                     }
                 } else {
                     incoming.setParam("error_msg", "stream_name = null");
-                    incoming.setParam("status_runner", Boolean.toString(false));
+                    incoming.setParam("run_status", Boolean.toString(false));
+                }
+
+                return incoming;
+
+
+            case "start_process":
+
+                if(streamName != null) {
+                    if (runnerEngine.isRunner(streamName)) {
+                        incoming.setParam("start_status", Boolean.toString(runnerEngine.runRunner(streamName)));
+                    } else {
+                        incoming.setParam("error_msg", "stream_name: " + streamName + " not found.");
+                        incoming.setParam("start_status", Boolean.toString(false));
+                    }
+                } else {
+                    incoming.setParam("error_msg", "stream_name = null");
+                    incoming.setParam("start_status", Boolean.toString(false));
                 }
 
                 return incoming;
 
             case "end_process":
-                logger.trace("{} cmd received", incoming.getParam("cmd"));
-
 
                 if(streamName != null) {
                     if (runnerEngine.isRunner(streamName)) {
-                        incoming.setParam("status_runner", Boolean.toString(runnerEngine.stopRunner(streamName)));
+                        incoming.setParam("end_status", Boolean.toString(runnerEngine.stopRunner(streamName)));
                     } else {
                         incoming.setParam("error_msg", "stream_name: " + streamName + " not found.");
-                        incoming.setParam("status_runner", Boolean.toString(false));
+                        incoming.setParam("end_status", Boolean.toString(false));
                     }
                 } else {
                     incoming.setParam("error_msg", "stream_name = null");
-                    incoming.setParam("status_runner", Boolean.toString(false));
+                    incoming.setParam("end_status", Boolean.toString(false));
                 }
 
                 return incoming;
@@ -117,7 +135,7 @@ public class ExecutorImpl implements Executor {
 
         switch (incoming.getParam("action")) {
             case "run_process":
-                logger.info("{} cmd received", incoming.getParam("cmd"));
+                logger.info("{} command received", incoming.getParam("command"));
 
                 if(streamName != null) {
                     if(runnerEngine.isRunner(streamName)) {

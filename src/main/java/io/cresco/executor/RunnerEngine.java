@@ -24,12 +24,12 @@ public class RunnerEngine {
 
     }
 
-    public boolean createRunner(String runCommand, String streamName, boolean asSudo) {
+    public boolean createRunner(String runCommand, String streamName, boolean asSudo, boolean metrics) {
         boolean isCreated = false;
         try {
 
             synchronized (lockRunners) {
-                runnerMap.put(streamName,new Runner(plugin, runCommand, streamName));
+                runnerMap.put(streamName,new Runner(plugin, runCommand, streamName, metrics));
             }
             isCreated = true;
 

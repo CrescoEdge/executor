@@ -16,25 +16,27 @@ public class StreamGobbler extends Thread {
     private String streamName;
     private PluginBuilder plugin;
     private CLogger logger;
+    private String streamType;
 
-    StreamGobbler(PluginBuilder plugin, InputStream is, String streamName) {
+    StreamGobbler(PluginBuilder plugin, InputStream is, String streamName, String streamType) {
         this.plugin = plugin;
         logger = plugin.getLogger(StreamGobbler.class.getName(),CLogger.Level.Info);
         this.is = is;
         this.streamName = streamName;
+        this.streamType = streamType;
 
     }
 
     @Override
     public void run() {
-        logger.info("StreamGobbler started for stream_name=" + streamName);
+        logger.info("StreamGobbler Type=" + streamType + " started for stream_name=" + streamName);
         try {
             InputStreamReader isr = new InputStreamReader(is);
             BufferedReader br = new BufferedReader(isr);
             String line;
             while ( ( line = br.readLine() ) != null ) {
 
-                logger.error("Output: {}", line);
+                logger.trace("Output: {}", line);
 
                 TextMessage tm = plugin.getAgentService().getDataPlaneService().createTextMessage();
                 tm.setStringProperty("stream_name", streamName);
