@@ -40,7 +40,7 @@ public class StreamGobbler extends Thread {
 
                 TextMessage tm = plugin.getAgentService().getDataPlaneService().createTextMessage();
                 tm.setStringProperty("stream_name", streamName);
-                tm.setStringProperty("type", "log");
+                tm.setStringProperty("type", streamType);
                 tm.setText(line);
                 plugin.getAgentService().getDataPlaneService().sendMessage(TopicType.AGENT,tm);
 

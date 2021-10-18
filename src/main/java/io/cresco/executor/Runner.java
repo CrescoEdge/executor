@@ -16,7 +16,7 @@ public class Runner implements Runnable {
     private String streamName;
     private boolean running = false;
     private boolean complete = false;
-    private boolean metrics = false;
+    private boolean metrics;
 
     public Runner(PluginBuilder plugin, String command, String streamName, boolean metrics) {
 
@@ -45,7 +45,13 @@ public class Runner implements Runnable {
             if (!canRun) return;
             running = true;
             logger.trace("Setting up ProcessBuilder");
-            ProcessBuilder pb = new ProcessBuilder("/bin/sh", "-c", command);
+            ProcessBuilder pb = null;
+            if (System.getProperty("os.name").startsWith("Linux")) { // ProcessBuilder with sudo}
+                pb = new ProcessBuilder("/bin/sh", "-c", command);
+            } else {
+                pb = new ProcessBuilder("CMD", "/C", command);
+            }
+
             logger.trace("Starting Process");
             Process p = pb.start();
 
