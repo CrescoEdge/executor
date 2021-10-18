@@ -46,7 +46,7 @@ public class Runner implements Runnable {
             running = true;
             logger.trace("Setting up ProcessBuilder");
             ProcessBuilder pb = null;
-            if (System.getProperty("os.name").startsWith("Linux")) { // ProcessBuilder with sudo}
+            if (System.getProperty("os.name").startsWith("Linux")) {
                 pb = new ProcessBuilder("/bin/sh", "-c", command);
             } else {
                 pb = new ProcessBuilder("CMD", "/C", command);
@@ -118,8 +118,15 @@ public class Runner implements Runnable {
                             "kill -2 $(ps aux | grep '[" +
                                     exchangeID.charAt(0) + "]" + exchangeID.substring(1) + "' | awk '{print $2}')");
                   */
-                ProcessBuilder pb = new ProcessBuilder("sudo", "bash", "-c",
-                        "kill -2 $(ps aux | grep '[" + command.charAt(0) + "]" + command.substring(1) + "' | awk '{print $2}')");
+                ProcessBuilder pb = null;
+
+                if (System.getProperty("os.name").startsWith("Linux")) {
+                    pb = new ProcessBuilder("sudo", "bash", "-c",
+                            "kill -2 $(ps aux | grep '[" + command.charAt(0) + "]" + command.substring(1) + "' | awk '{print $2}')");
+
+                } else {
+                    pb = new ProcessBuilder("CMD", "/C", "taskkill","/IM", command, "/F");
+                }
 
                 Process p = pb.start();
                     try {
