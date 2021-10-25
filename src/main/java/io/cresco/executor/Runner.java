@@ -110,7 +110,7 @@ public class Runner implements Runnable {
     }
 
     public void shutdown() {
-        if (!complete) {
+        if (complete) {
             logger.info("Killing process");
             try {
                 /*
