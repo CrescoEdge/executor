@@ -123,9 +123,16 @@ public class Runner implements Runnable {
                 if (System.getProperty("os.name").startsWith("Linux")) {
                     pb = new ProcessBuilder("sudo", "bash", "-c",
                             "kill -2 $(ps aux | grep '[" + command.charAt(0) + "]" + command.substring(1) + "' | awk '{print $2}')");
-
-                } else {
+                } else if (System.getProperty("os.name").startsWith("MacOS")) {
+                    pb = new ProcessBuilder("sudo", "bash", "-c",
+                            "kill -2 $(ps aux | grep '[" + command.charAt(0) + "]" + command.substring(1) + "' | awk '{print $2}')");
+                } else if (System.getProperty("os.name").startsWith("Windows")) {
                     pb = new ProcessBuilder("CMD", "/C", "taskkill","/IM", command, "/F");
+                }
+                else {
+                    pb = new ProcessBuilder("sudo", "bash", "-c",
+                            "kill -2 $(ps aux | grep '[" + command.charAt(0) + "]" + command.substring(1) + "' | awk '{print $2}')");
+                    logger.error("Unknown OS");
                 }
 
                 Process p = pb.start();
