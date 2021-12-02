@@ -119,7 +119,7 @@ public class Runner implements Runnable {
                                     exchangeID.charAt(0) + "]" + exchangeID.substring(1) + "' | awk '{print $2}')");
                   */
                 ProcessBuilder pb = null;
-
+                logger.info("Running command on system type: " + System.getProperty("os.name"));
                 if (System.getProperty("os.name").startsWith("Linux")) {
                     pb = new ProcessBuilder("sudo", "bash", "-c",
                             "kill -2 $(ps aux | grep '[" + command.charAt(0) + "]" + command.substring(1) + "' | awk '{print $2}')");

@@ -34,16 +34,15 @@ public class StreamGobbler extends Thread {
             InputStreamReader isr = new InputStreamReader(is);
             BufferedReader br = new BufferedReader(isr);
             String line;
-            while ( ( line = br.readLine() ) != null ) {
+            while(plugin.isActive()) {
+                if ((line = br.readLine()) != null) {
 
-                logger.trace("Output: {}", line);
-
-                TextMessage tm = plugin.getAgentService().getDataPlaneService().createTextMessage();
-                tm.setStringProperty("stream_name", streamName);
-                tm.setStringProperty("type", streamType);
-                tm.setText(line);
-                plugin.getAgentService().getDataPlaneService().sendMessage(TopicType.AGENT,tm);
-
+                    TextMessage tm = plugin.getAgentService().getDataPlaneService().createTextMessage();
+                    tm.setStringProperty("stream_name", streamName);
+                    tm.setStringProperty("type", streamType);
+                    tm.setText(line);
+                    plugin.getAgentService().getDataPlaneService().sendMessage(TopicType.AGENT, tm);
+                    //logger.info("Output: {}", line);
                 /*
                 logger.debug("Output: {}", line);
                 Map<String, String> params = new HashMap<>();
@@ -60,7 +59,10 @@ public class StreamGobbler extends Thread {
                 plugin.sendMsgEvent(new MsgEvent(MsgEvent.Type.EXEC, plugin.getRegion(), plugin.getAgent(),
                         plugin.getPluginID(), params));
                 */
-                Thread.sleep(50);
+                    Thread.sleep(50);
+                } else {
+                    Thread.sleep(1000);
+                }
             }
             br.close();
         } catch (IOException e) {
