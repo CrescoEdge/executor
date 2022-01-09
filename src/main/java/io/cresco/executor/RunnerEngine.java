@@ -26,9 +26,10 @@ public class RunnerEngine {
         boolean isReset = true;
         try {
             List<String> streamNameList = new ArrayList<>();
-
-            for (Map.Entry<String,Runner> entry : runnerMap.entrySet())
-                streamNameList.add(entry.getKey());
+            synchronized (lockRunners) {
+                for (Map.Entry<String, Runner> entry : runnerMap.entrySet())
+                    streamNameList.add(entry.getKey());
+            }
 
             for(String streamName : streamNameList) {
                 if(!stopRunner(streamName)) {
