@@ -3,9 +3,7 @@ package io.cresco.executor;
 import io.cresco.library.plugin.PluginBuilder;
 import io.cresco.library.utilities.CLogger;
 
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class RunnerEngine {
@@ -19,9 +17,30 @@ public class RunnerEngine {
 
     public RunnerEngine(PluginBuilder plugin) {
         this.plugin = plugin;
-        logger = plugin.getLogger(RunnerMetrics.class.getName(), CLogger.Level.Info);
+        logger = plugin.getLogger(RunnerEngine.class.getName(), CLogger.Level.Info);
         runnerMap = Collections.synchronizedMap(new HashMap<>());
 
+    }
+
+    public boolean resetRunners() {
+        boolean isReset = true;
+        try {
+            List<String> streamNameList = new ArrayList<>();
+
+            for (Map.Entry<String,Runner> entry : runnerMap.entrySet())
+                streamNameList.add(entry.getKey());
+
+            for(String streamName : streamNameList) {
+                if(!stopRunner(streamName)) {
+                    isReset = false;
+                }
+            }
+
+        } catch (Exception ex) {
+            logger.error("resetRunner() " + ex.getMessage());
+            isReset = false;
+        }
+        return isReset;
     }
 
     public boolean createRunner(String runCommand, String streamName, boolean asSudo, boolean metrics) {

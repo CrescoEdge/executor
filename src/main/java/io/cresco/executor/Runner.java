@@ -62,9 +62,11 @@ public class Runner implements Runnable {
                 //runnerMetrics.start();
             }
 
+
             logger.trace("Starting Output Forwarders");
             StreamGobbler errorGobbler = new StreamGobbler(plugin, p.getErrorStream(), streamName, "error");
             StreamGobbler outputGobbler = new StreamGobbler(plugin, p.getInputStream(), streamName, "output");
+
 
             errorGobbler.start();
             outputGobbler.start();
