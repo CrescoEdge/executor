@@ -112,17 +112,7 @@ public class ExecutorImpl implements Executor {
 
             case "reset_runners":
 
-                if(streamName != null) {
-                    if (runnerEngine.isRunner(streamName)) {
-                        incoming.setParam("reset_status", Boolean.toString(runnerEngine.resetRunners()));
-                    } else {
-                        incoming.setParam("error_msg", "stream_name: " + streamName + " not found.");
-                        incoming.setParam("reset_status", Boolean.toString(false));
-                    }
-                } else {
-                    incoming.setParam("error_msg", "stream_name = null");
-                    incoming.setParam("reset_status", Boolean.toString(false));
-                }
+                incoming.setParam("reset_status", Boolean.toString(runnerEngine.resetRunners()));
 
                 return incoming;
 
