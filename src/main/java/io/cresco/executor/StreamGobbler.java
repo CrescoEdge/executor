@@ -65,6 +65,7 @@ public class StreamGobbler extends Thread {
                 }
             }
             br.close();
+            isr.close();
         } catch (IOException e) {
             logger.error("run() : {}", e.getMessage());
         } catch (Exception e) {
