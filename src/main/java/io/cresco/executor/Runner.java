@@ -5,7 +5,9 @@ import io.cresco.library.plugin.PluginBuilder;
 import io.cresco.library.utilities.CLogger;
 
 import javax.jms.MapMessage;
-import java.io.IOException;
+import javax.jms.Message;
+import javax.jms.TextMessage;
+import java.io.*;
 import java.util.*;
 
 public class Runner implements Runnable {
@@ -45,11 +47,31 @@ public class Runner implements Runnable {
             if (!canRun) return;
             running = true;
             logger.trace("Setting up ProcessBuilder");
+
+            boolean isInteractive = false;
+            if(command.toLowerCase().contains("-interactive-")) {
+                isInteractive = true;
+            }
+
             ProcessBuilder pb = null;
-            if (System.getProperty("os.name").startsWith("Linux")) {
-                pb = new ProcessBuilder("/bin/sh", "-c", command);
+
+            logger.error(System.getProperty("os.name"));
+            if(isInteractive) {
+                if (System.getProperty("os.name").startsWith("Linux")) {
+                    pb = new ProcessBuilder("/bin/sh", "-i");
+                } else if (System.getProperty("os.name").startsWith("Mac OS X")) {
+                    pb = new ProcessBuilder("/bin/sh", "-i");
+                } else {
+                    pb = new ProcessBuilder("CMD");
+                }
             } else {
-                pb = new ProcessBuilder("CMD", "/C", command);
+                if (System.getProperty("os.name").startsWith("Linux")) {
+                    pb = new ProcessBuilder("/bin/sh", "-c", command);
+                } else if (System.getProperty("os.name").startsWith("Mac OS X")) {
+                    pb = new ProcessBuilder("/bin/sh", "-c", command);
+                }  else {
+                    pb = new ProcessBuilder("CMD", "/C", command);
+                }
             }
 
             logger.trace("Starting Process");
@@ -62,6 +84,8 @@ public class Runner implements Runnable {
                 //runnerMetrics.start();
             }
 
+            logger.info("Starting Input Listener");
+            createListener(p.getOutputStream(), streamName, "input");
 
             logger.trace("Starting Output Forwarders");
             StreamGobbler errorGobbler = new StreamGobbler(plugin, p.getErrorStream(), streamName, "error");
@@ -106,6 +130,48 @@ public class Runner implements Runnable {
             e.printStackTrace();
         }
     }
+
+    private void writeString(OutputStream os, String request,
+                                         String charsetName) throws IOException {
+        OutputStreamWriter writer = new OutputStreamWriter(os, charsetName);
+        BufferedWriter bw = new BufferedWriter(writer);
+        bw.write(request);
+        bw.write("\r\n");
+        bw.flush();
+    }
+
+    private boolean createListener(OutputStream os, String streamName, String streamType) {
+        boolean isCreated = false;
+        try{
+            String stream_query = "stream_name='" + streamName + "' and type='" + streamType + "'";
+
+            javax.jms.MessageListener ml = new javax.jms.MessageListener() {
+                public void onMessage(Message msg) {
+                    try {
+                        logger.trace("INCOMING: " + msg.toString());
+
+                        if (msg instanceof TextMessage) {
+                            String message = ((TextMessage) msg).getText();
+                            writeString(os, message, "UTF-8");
+                        }
+                    } catch(Exception ex) {
+
+                        ex.printStackTrace();
+                    }
+                }
+            };
+            //logger.error("APIDataPlane: creating listener: " + "stream_query=" + stream_query + "");
+            String listenerid = plugin.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,stream_query);
+
+            isCreated = true;
+
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        }
+
+        return isCreated;
+    }
+
 
     public Boolean isRunning() {
         return this.running;
