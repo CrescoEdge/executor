@@ -9,6 +9,7 @@ import javax.jms.Message;
 import javax.jms.TextMessage;
 import java.io.*;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 
 public class Runner implements Runnable {
 
@@ -57,6 +58,9 @@ public class Runner implements Runnable {
 
             logger.error(System.getProperty("os.name"));
             if(isInteractive) {
+
+                pb =  new ProcessBuilder();
+
                 if (System.getProperty("os.name").startsWith("Linux")) {
                     pb = new ProcessBuilder("/bin/sh", "-i");
                 } else if (System.getProperty("os.name").startsWith("Mac OS X")) {
@@ -64,6 +68,7 @@ public class Runner implements Runnable {
                 } else {
                     pb = new ProcessBuilder("CMD");
                 }
+
             } else {
                 if (System.getProperty("os.name").startsWith("Linux")) {
                     pb = new ProcessBuilder("/bin/sh", "-c", command);
