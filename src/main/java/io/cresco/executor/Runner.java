@@ -93,9 +93,9 @@ public class Runner implements Runnable {
             createListener(p.getOutputStream(), streamName, "input");
 
             logger.trace("Starting Output Forwarders");
-            StreamGobbler errorGobbler = new StreamGobbler(plugin, p.getErrorStream(), streamName, "error");
-            StreamGobbler outputGobbler = new StreamGobbler(plugin, p.getInputStream(), streamName, "output");
-
+            //StreamGobbler errorGobbler = new StreamGobbler(plugin, p.getErrorStream(), streamName, "error");
+            StreamGobbler errorGobbler = new StreamGobbler(plugin, p.getErrorStream(), streamName, "error", "error");
+            StreamGobbler outputGobbler = new StreamGobbler(plugin, p.getInputStream(), streamName, "output", "output");
 
             errorGobbler.start();
             outputGobbler.start();
@@ -153,10 +153,12 @@ public class Runner implements Runnable {
             javax.jms.MessageListener ml = new javax.jms.MessageListener() {
                 public void onMessage(Message msg) {
                     try {
-                        logger.trace("INCOMING: " + msg.toString());
+
 
                         if (msg instanceof TextMessage) {
+
                             String message = ((TextMessage) msg).getText();
+                            logger.debug("INCOMING TO EXEC PLUGIN: " + message);
                             writeString(os, message, "UTF-8");
                         }
                     } catch(Exception ex) {
