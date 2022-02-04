@@ -6,7 +6,6 @@ import io.cresco.library.utilities.CLogger;
 
 import javax.jms.MapMessage;
 import javax.jms.Message;
-import javax.jms.StreamMessage;
 import javax.jms.TextMessage;
 import java.io.*;
 import java.util.*;
@@ -21,7 +20,6 @@ public class Runner implements Runnable {
     private boolean running = false;
     private boolean complete = false;
     private boolean metrics;
-    private BufferedOutputStream bos;
 
     public Runner(PluginBuilder plugin, String command, String streamName, boolean metrics) {
 
@@ -139,31 +137,12 @@ public class Runner implements Runnable {
     }
 
     private void writeString(OutputStream os, String request,
-                                         String charsetName) throws IOException {
+                             String charsetName) throws IOException {
         OutputStreamWriter writer = new OutputStreamWriter(os, charsetName);
         BufferedWriter bw = new BufferedWriter(writer);
         bw.write(request);
         bw.write("\r\n");
         bw.flush();
-    }
-
-    private void writeStream(OutputStream os, StreamMessage streamMessage) throws IOException {
-
-            try {
-                byte[] buffer = new byte[2048];
-                int length = 0;
-
-                bos = new BufferedOutputStream(os);
-
-                while ((length = streamMessage.readBytes(buffer)) > 0) {
-                    bos.write(buffer, 0, length);
-                }
-                bos.flush();
-
-            } catch (Exception ex) {
-                logger.error(ex.getMessage());
-            }
-
     }
 
     private boolean createListener(OutputStream os, String streamName, String streamType) {
@@ -180,14 +159,6 @@ public class Runner implements Runnable {
                             String message = ((TextMessage) msg).getText();
                             writeString(os, message, "UTF-8");
                         }
-
-                        if (msg instanceof StreamMessage) {
-
-                            StreamMessage streamMessage = (StreamMessage)msg;
-                            writeStream(os,streamMessage);
-
-                        }
-
                     } catch(Exception ex) {
 
                         ex.printStackTrace();
@@ -238,12 +209,12 @@ public class Runner implements Runnable {
                 }
 
                 Process p = pb.start();
-                    try {
-                        p.waitFor();
-                        running = false;
-                    } catch (InterruptedException e) {
-                        // Todo: Maybe this should be pushed up the stack?
-                    }
+                try {
+                    p.waitFor();
+                    running = false;
+                } catch (InterruptedException e) {
+                    // Todo: Maybe this should be pushed up the stack?
+                }
 
             } catch (IOException e) {
                 logger.error("IOException in shutdown() : " + e.getMessage());
