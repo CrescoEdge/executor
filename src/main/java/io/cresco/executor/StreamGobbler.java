@@ -32,10 +32,12 @@ public class StreamGobbler extends Thread {
         logger.info("StreamGobbler Type=" + streamType + " started for stream_name=" + streamName);
         try {
             InputStreamReader isr = new InputStreamReader(is);
+
             BufferedReader br = new BufferedReader(isr);
             String line;
             while(plugin.isActive()) {
                 if ((line = br.readLine()) != null) {
+
 
                     TextMessage tm = plugin.getAgentService().getDataPlaneService().createTextMessage();
                     tm.setStringProperty("stream_name", streamName);
@@ -43,25 +45,10 @@ public class StreamGobbler extends Thread {
                     tm.setText(line);
                     plugin.getAgentService().getDataPlaneService().sendMessage(TopicType.AGENT, tm);
                     //logger.info("Output: {}", line);
-                /*
-                logger.debug("Output: {}", line);
-                Map<String, String> params = new HashMap<>();
-                params.put("src_region", plugin.getRegion());
-                params.put("src_agent", plugin.getAgent());
-                params.put("src_plugin", plugin.getPluginID());
-                params.put("dst_region", dstRegion);
-                params.put("dst_agent", dstAgent);
-                params.put("dst_plugin", dstPlugin);
-                params.put("ts", Long.toString(new Date().getTime()));
-                params.put("cmd", "execution_log");
-                params.put("exchange", exchangeID);
-                params.put("log", "[" + new Date() + "] " + line);
-                plugin.sendMsgEvent(new MsgEvent(MsgEvent.Type.EXEC, plugin.getRegion(), plugin.getAgent(),
-                        plugin.getPluginID(), params));
-                */
+
                     Thread.sleep(50);
                 } else {
-                    Thread.sleep(1000);
+                    Thread.sleep(500);
                 }
             }
             br.close();
