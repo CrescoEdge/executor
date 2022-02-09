@@ -158,7 +158,7 @@ public class Runner implements Runnable {
                         if (msg instanceof TextMessage) {
 
                             String message = ((TextMessage) msg).getText();
-                            logger.debug("INCOMING TO EXEC PLUGIN: " + message);
+                            logger.error("INCOMING TO EXEC PLUGIN: " + message);
                             writeString(os, message, "UTF-8");
                         }
                     } catch(Exception ex) {

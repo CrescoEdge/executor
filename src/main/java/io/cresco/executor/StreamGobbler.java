@@ -39,7 +39,7 @@ public class StreamGobbler extends Thread {
             while(plugin.isActive()) {
                 if ((line = br.readLine()) != null) {
 
-                    logger.debug(gobblerId + " OUTGOING FROM EXEC PLUGIN: " + line);
+                    logger.error(gobblerId + " OUTGOING FROM EXEC PLUGIN: " + line);
                     TextMessage tm = plugin.getAgentService().getDataPlaneService().createTextMessage();
                     tm.setStringProperty("stream_name", streamName);
                     tm.setStringProperty("type", streamType);
