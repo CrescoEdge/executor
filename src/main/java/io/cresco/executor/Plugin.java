@@ -73,11 +73,14 @@ public class Plugin implements PluginService {
     @Override
     public boolean isStarted() {
 
-        System.out.println("Started PluginID:" + (String) map.get("pluginID"));
+        //System.out.println("Started PluginID:" + (String) map.get("pluginID"));
 
         try {
             pluginBuilder = new PluginBuilder(this.getClass().getName(), context, map);
             this.logger = pluginBuilder.getLogger(Plugin.class.getName(), CLogger.Level.Info);
+
+            logger.info("Started Executor PluginID:" + map.get("pluginID"));
+
             this.runnerEngine = new RunnerEngine(pluginBuilder);
 
             this.executor = new ExecutorImpl(pluginBuilder, runnerEngine);
