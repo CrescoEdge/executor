@@ -57,7 +57,7 @@ public class Runner implements Runnable {
 
             ProcessBuilder pb = null;
 
-            logger.error(System.getProperty("os.name"));
+            logger.debug(System.getProperty("os.name"));
             if(isInteractive) {
 
                 pb =  new ProcessBuilder();
@@ -159,7 +159,7 @@ public class Runner implements Runnable {
                         if (msg instanceof TextMessage) {
 
                             String message = ((TextMessage) msg).getText();
-                            logger.error("INCOMING TO EXEC PLUGIN: " + message);
+                            logger.debug("INCOMING TO EXEC PLUGIN: " + message);
                             writeString(os, message, "UTF-8");
                         }
                     } catch(Exception ex) {
