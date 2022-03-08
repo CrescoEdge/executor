@@ -20,6 +20,7 @@ public class Runner implements Runnable {
     private boolean running = false;
     private boolean complete = false;
     private boolean metrics;
+    private String listenerid;
 
     public Runner(PluginBuilder plugin, String command, String streamName, boolean metrics) {
 
@@ -168,7 +169,7 @@ public class Runner implements Runnable {
                 }
             };
             //logger.error("APIDataPlane: creating listener: " + "stream_query=" + stream_query + "");
-            String listenerid = plugin.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,stream_query);
+            listenerid = plugin.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,stream_query);
 
             isCreated = true;
 
@@ -188,6 +189,9 @@ public class Runner implements Runnable {
         if (!complete) {
             logger.info("Killing process");
             try {
+
+                //stop listener
+                Plugin.pluginBuilder.getAgentService().getDataPlaneService().removeMessageListener(listenerid);
                 /*
                     ProcessBuilder pb = new ProcessBuilder("sudo", "bash", "-c",
                             "kill -2 $(ps aux | grep '[" +
