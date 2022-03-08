@@ -28,7 +28,7 @@ public class ExecutorImpl implements Executor {
 
         switch (incoming.getParam("action")) {
             case "config_process":
-                logger.info("{} command received", incoming.getParam("command"));
+                logger.debug("{} command received", incoming.getParam("command"));
 
                 if(streamName != null) {
                     if(runnerEngine.isRunner(streamName)) {
@@ -95,7 +95,6 @@ public class ExecutorImpl implements Executor {
                 return incoming;
 
             case "end_process":
-
                 if(streamName != null) {
                     if (runnerEngine.isRunner(streamName)) {
                         incoming.setParam("end_status", Boolean.toString(runnerEngine.stopRunner(streamName)));
@@ -107,7 +106,6 @@ public class ExecutorImpl implements Executor {
                     incoming.setParam("error_msg", "stream_name = null");
                     incoming.setParam("end_status", Boolean.toString(false));
                 }
-
                 return incoming;
 
             case "reset_runners":
@@ -142,7 +140,7 @@ public class ExecutorImpl implements Executor {
 
         switch (incoming.getParam("action")) {
             case "run_process":
-                logger.info("{} command received", incoming.getParam("command"));
+                logger.debug("{} command received", incoming.getParam("command"));
 
                 if(streamName != null) {
                     if(runnerEngine.isRunner(streamName)) {

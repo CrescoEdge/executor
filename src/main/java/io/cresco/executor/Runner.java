@@ -9,7 +9,6 @@ import javax.jms.Message;
 import javax.jms.TextMessage;
 import java.io.*;
 import java.util.*;
-import java.util.concurrent.TimeUnit;
 
 public class Runner implements Runnable {
 
@@ -35,7 +34,7 @@ public class Runner implements Runnable {
     @Override
     public void run() {
         try {
-            logger.info("Running Runner");
+            logger.debug("Running Runner");
             logger.debug("Command: [" + command + "]");
             boolean canRun = false;
             logger.trace("Checking to see if eligable for running");
@@ -90,7 +89,7 @@ public class Runner implements Runnable {
                 //runnerMetrics.start();
             }
 
-            logger.info("Starting Input Listener");
+            logger.debug("Starting Input Listener");
             createListener(p.getOutputStream(), streamName, "input");
 
             logger.trace("Starting Output Forwarders");
@@ -187,7 +186,7 @@ public class Runner implements Runnable {
 
     public void shutdown() {
         if (!complete) {
-            logger.info("Killing process");
+            logger.debug("Killing process");
             try {
 
                 //stop listener
@@ -198,12 +197,14 @@ public class Runner implements Runnable {
                                     exchangeID.charAt(0) + "]" + exchangeID.substring(1) + "' | awk '{print $2}')");
                   */
                 ProcessBuilder pb = null;
-                logger.info("Running command on system type: " + System.getProperty("os.name"));
+                logger.debug("Running command on system type: " + System.getProperty("os.name"));
                 if (System.getProperty("os.name").startsWith("Linux")) {
-                    pb = new ProcessBuilder("sudo", "bash", "-c",
+                    //pb = new ProcessBuilder("sudo", "bash", "-c",
+                    pb = new ProcessBuilder("bash", "-c",
                             "kill -2 $(ps aux | grep '[" + command.charAt(0) + "]" + command.substring(1) + "' | awk '{print $2}')");
-                } else if (System.getProperty("os.name").startsWith("MacOS")) {
-                    pb = new ProcessBuilder("sudo", "bash", "-c",
+                } else if (System.getProperty("os.name").startsWith("MacOS") || System.getProperty("os.name").startsWith("Mac OS X"))  {
+                    //pb = new ProcessBuilder("sudo", "bash", "-c",
+                    pb = new ProcessBuilder("bash", "-c",
                             "kill -2 $(ps aux | grep '[" + command.charAt(0) + "]" + command.substring(1) + "' | awk '{print $2}')");
                 } else if (System.getProperty("os.name").startsWith("Windows")) {
                     pb = new ProcessBuilder("CMD", "/C", "taskkill","/IM", command, "/F");
@@ -220,6 +221,7 @@ public class Runner implements Runnable {
                     running = false;
                 } catch (InterruptedException e) {
                     // Todo: Maybe this should be pushed up the stack?
+                    logger.error("InterruptedException: " + e.getMessage());
                 }
 
             } catch (IOException e) {
