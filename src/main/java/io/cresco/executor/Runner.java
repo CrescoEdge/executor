@@ -4,9 +4,9 @@ import io.cresco.library.data.TopicType;
 import io.cresco.library.plugin.PluginBuilder;
 import io.cresco.library.utilities.CLogger;
 
-import javax.jms.MapMessage;
-import javax.jms.Message;
-import javax.jms.TextMessage;
+import jakarta.jms.MapMessage;
+import jakarta.jms.Message;
+import jakarta.jms.TextMessage;
 import java.io.*;
 import java.util.*;
 
@@ -150,7 +150,7 @@ public class Runner implements Runnable {
         try{
             String stream_query = "stream_name='" + streamName + "' and type='" + streamType + "'";
 
-            javax.jms.MessageListener ml = new javax.jms.MessageListener() {
+            jakarta.jms.MessageListener ml = new jakarta.jms.MessageListener() {
                 public void onMessage(Message msg) {
                     try {
 

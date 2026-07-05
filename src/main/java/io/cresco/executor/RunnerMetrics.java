@@ -8,7 +8,7 @@ import oshi.SystemInfo;
 import oshi.software.os.OSProcess;
 import oshi.software.os.OperatingSystem;
 
-import javax.jms.MapMessage;
+import jakarta.jms.MapMessage;
 import java.util.*;
 
 public class RunnerMetrics extends Thread {
@@ -40,7 +40,7 @@ public class RunnerMetrics extends Thread {
             SystemInfo systemInfo = new SystemInfo();
             OperatingSystem os = systemInfo.getOperatingSystem();
 
-            OSProcess[] p = os.getProcesses(0, OperatingSystem.ProcessSort.CPU);
+            List<OSProcess> p = os.getProcesses(null, OperatingSystem.ProcessSorting.CPU_DESC, 0);
             for(OSProcess op : p) {
 
                 //System.out.println(op.getCommandLine());
@@ -65,7 +65,9 @@ public class RunnerMetrics extends Thread {
 
             if(rootProcessId != -1) {
                 OSProcess rootOp = os.getProcess(rootProcessId);
-                while (!os.getProcess(rootProcessId).getState().equals(State.TERMINATED)) {
+                // OSHI 7.x: getProcess() returns null (or state INVALID) once the process exits.
+                while (os.getProcess(rootProcessId) != null
+                        && os.getProcess(rootProcessId).getState() != OSProcess.State.INVALID) {
 
                     long processCount = 0;
                     long bytesRead = 0;
@@ -75,7 +77,7 @@ public class RunnerMetrics extends Thread {
                     long setSize = 0;
                     long virtualSize = 0;
 
-                    OSProcess[] pp = os.getProcesses(0, OperatingSystem.ProcessSort.CPU);
+                    List<OSProcess> pp = os.getProcesses(null, OperatingSystem.ProcessSorting.CPU_DESC, 0);
                     for(OSProcess op : pp) {
 
 
@@ -83,14 +85,14 @@ public class RunnerMetrics extends Thread {
                             processList.add(op.getProcessID());
                         }
 
-                        if((processList.contains(op.getProcessID())) && (!op.getState().equals(State.TERMINATED))) {
+                        if((processList.contains(op.getProcessID())) && (op.getState() != OSProcess.State.INVALID)) {
 
                             processCount++;
                             bytesRead += op.getBytesRead();
                             bytesWritten += op.getBytesWritten();
                             kernelTime += op.getKernelTime();
                             threadCount += op.getThreadCount();
-                            setSize += op.getResidentSetSize();
+                            setSize += op.getResidentMemory();
                             virtualSize += op.getVirtualSize();
                         }
                     }
