@@ -46,6 +46,10 @@ import java.util.UUID;
         summary = "Stop all runners on this executor.",
         why = "Tear down every process this plugin is running.",
         returns = @CrescoReturn(name = "reset_status", description = "true on success")),
+    @CrescoAction(name = "getmetrics", type = "EXEC",
+        summary = "Return this plugin's live metrics (active/configured runner counts) as MeasurementEngine gauges JSON.",
+        why = "Feeds the fabric-wide getmetricinventory; unified Micrometer metrics for the executor.",
+        returns = @CrescoReturn(name = "metrics", type = "object", description = "getAllMetrics() JSON")),
     @CrescoAction(name = "getcapabilities", type = "EXEC",
         summary = "Return this plugin's self-describing capability document (its message actions as LLM tool specs).",
         why = "Discovery: lets a client/LLM learn what this plugin can do and how to call it.",
@@ -56,12 +60,14 @@ public class ExecutorImpl implements Executor {
     private PluginBuilder plugin;
     private CLogger logger;
     private RunnerEngine runnerEngine;
+    private ExecutorMetrics executorMetrics;
 
 
-    public ExecutorImpl(PluginBuilder pluginBuilder, RunnerEngine runnerEngine) {
+    public ExecutorImpl(PluginBuilder pluginBuilder, RunnerEngine runnerEngine, ExecutorMetrics executorMetrics) {
         this.plugin = pluginBuilder;
         logger = plugin.getLogger(ExecutorImpl.class.getName(),CLogger.Level.Info);
         this.runnerEngine = runnerEngine;
+        this.executorMetrics = executorMetrics;
 
     }
 
@@ -69,8 +75,14 @@ public class ExecutorImpl implements Executor {
     public MsgEvent executeCONFIG(MsgEvent incoming) {
 
         String streamName = incoming.getParam("stream_name");
+        String action = incoming.getParam("action");
+        if (action == null) {
+            incoming.setParam("error", Boolean.toString(true));
+            incoming.setParam("error_msg", "no action provided");
+            return incoming;
+        }
 
-        switch (incoming.getParam("action")) {
+        switch (action) {
             case "config_process":
                 logger.debug("{} command received", incoming.getParam("command"));
 
@@ -91,14 +103,14 @@ public class ExecutorImpl implements Executor {
                         } else {
                             logger.error("Must provide command");
                             incoming.setParam("error", Boolean.toString(true));
-                            incoming.setParam("error_msg", "Runner already exist stream_name: " + streamName);
+                            incoming.setParam("error_msg", "Must provide command");
                             incoming.setParam("config_status", Boolean.toString(false));
                         }
                     }
                 } else {
                     logger.error("Must provide stream_name");
                     incoming.setParam("error", Boolean.toString(true));
-                    incoming.setParam("error_msg", "Runner already exist stream_name: " + streamName);
+                    incoming.setParam("error_msg", "Must provide stream_name");
                     incoming.setParam("config_status", Boolean.toString(false));
                 }
 
@@ -181,31 +193,44 @@ public class ExecutorImpl implements Executor {
     public MsgEvent executeEXEC(MsgEvent incoming) {
 
         String streamName = incoming.getParam("stream_name");
+        String action = incoming.getParam("action");
+        if (action == null) {
+            incoming.setParam("error", Boolean.toString(true));
+            incoming.setParam("error_msg", "no action provided");
+            return incoming;
+        }
 
-        switch (incoming.getParam("action")) {
+        switch (action) {
             case "run_process":
                 logger.debug("{} command received", incoming.getParam("command"));
 
-                if(streamName != null) {
-                    if(runnerEngine.isRunner(streamName)) {
-                        if(runnerEngine.isRunning(streamName)) {
-                            logger.error("Trying to run, but runner != null, STOP first.");
-                            incoming.setParam("error", Boolean.toString(true));
-                            incoming.setParam("error_msg", "Process is already running");
-                            incoming.setParam("status", Boolean.toString(false));
-                        } else {
-                            runnerEngine.runRunner(streamName);
-                            incoming.setParam("status", Boolean.toString(true));
-                        }
-                    }
+                if(streamName == null) {
+                    incoming.setParam("error", Boolean.toString(true));
+                    incoming.setParam("error_msg", "Must provide stream_name");
+                    incoming.setParam("status", Boolean.toString(false));
+                } else if(!runnerEngine.isRunner(streamName)) {
+                    incoming.setParam("error", Boolean.toString(true));
+                    incoming.setParam("error_msg", "stream_name: " + streamName + " not configured (config_process first)");
+                    incoming.setParam("status", Boolean.toString(false));
+                } else if(runnerEngine.isRunning(streamName)) {
+                    logger.error("Trying to run, but runner is already running, STOP first.");
+                    incoming.setParam("error", Boolean.toString(true));
+                    incoming.setParam("error_msg", "Process is already running");
+                    incoming.setParam("status", Boolean.toString(false));
+                } else {
+                    incoming.setParam("status", Boolean.toString(runnerEngine.runRunner(streamName)));
                 }
+                return incoming;
+            case "getmetrics":
+                incoming.setParam("metrics", executorMetrics.getMetricsJson());
+                incoming.setParam("status", "10");
                 return incoming;
             case "getcapabilities":
                 return CapabilityResponder.respond(incoming, this);
             default:
-                logger.error("Unknown cmd: {}", incoming.getParam("cmd"));
+                logger.error("Unknown action: {}", action);
                 incoming.setParam("error", Boolean.toString(true));
-                incoming.setParam("error_msg", "Unknown cmd  [" + incoming.getParam("cmd") + "]");
+                incoming.setParam("error_msg", "Unknown action  [" + action + "]");
                 return incoming;
         }
 

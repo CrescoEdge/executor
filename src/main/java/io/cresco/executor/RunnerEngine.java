@@ -4,136 +4,129 @@ import io.cresco.library.plugin.PluginBuilder;
 import io.cresco.library.utilities.CLogger;
 
 import java.util.*;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 public class RunnerEngine {
 
-    private PluginBuilder plugin;
-    private CLogger logger;
+    private final PluginBuilder plugin;
+    private final CLogger logger;
 
-    private AtomicBoolean lockRunners = new AtomicBoolean();
-
-    private Map<String,Runner> runnerMap;
+    private final Object lock = new Object();
+    private final Map<String, Runner> runnerMap = new HashMap<>();
 
     public RunnerEngine(PluginBuilder plugin) {
         this.plugin = plugin;
         logger = plugin.getLogger(RunnerEngine.class.getName(), CLogger.Level.Info);
-        runnerMap = Collections.synchronizedMap(new HashMap<>());
-
     }
 
     public boolean resetRunners() {
         boolean isReset = true;
-        try {
-            List<String> streamNameList = new ArrayList<>();
-            synchronized (lockRunners) {
-                for (Map.Entry<String, Runner> entry : runnerMap.entrySet())
-                    streamNameList.add(entry.getKey());
+        List<String> names;
+        synchronized (lock) {
+            names = new ArrayList<>(runnerMap.keySet());
+        }
+        for (String streamName : names) {
+            if (!stopRunner(streamName)) {
+                isReset = false;
             }
-
-            for(String streamName : streamNameList) {
-                if(!stopRunner(streamName)) {
-                    isReset = false;
-                }
-            }
-
-        } catch (Exception ex) {
-            logger.error("resetRunner() " + ex.getMessage());
-            isReset = false;
         }
         return isReset;
     }
 
     public boolean createRunner(String runCommand, String streamName, boolean asSudo, boolean metrics) {
-        boolean isCreated = false;
         try {
-
-            synchronized (lockRunners) {
-                runnerMap.put(streamName,new Runner(plugin, runCommand, streamName, metrics));
+            synchronized (lock) {
+                if (runnerMap.containsKey(streamName)) {
+                    logger.error("createRunner: runner already exists for stream_name " + streamName);
+                    return false;
+                }
+                runnerMap.put(streamName, new Runner(plugin, runCommand, streamName, metrics));
             }
-            isCreated = true;
-
+            return true;
         } catch (Exception ex) {
             logger.error("createRunner() " + ex.getMessage());
+            return false;
         }
-
-        return isCreated;
     }
-
 
     public boolean runRunner(String streamName) {
-        boolean isRunning = false;
         try {
-
-            synchronized (lockRunners) {
-                if(runnerMap.get(streamName) != null) {
-                    new Thread(runnerMap.get(streamName)).start();
+            synchronized (lock) {
+                Runner runner = runnerMap.get(streamName);
+                if (runner == null) {
+                    logger.error("runRunner: no runner for stream_name " + streamName);
+                    return false;
                 }
+                if (runner.isRunning()) {
+                    logger.error("runRunner: runner " + streamName + " is already running");
+                    return false;
+                }
+                Thread t = new Thread(runner, "executor-runner-" + streamName);
+                t.setDaemon(true);
+                t.start();
             }
-            isRunning = true;
-
+            return true;
         } catch (Exception ex) {
             logger.error("runRunner() " + ex.getMessage());
+            return false;
         }
-
-        return isRunning;
     }
 
-
     public boolean isRunning(String streamName) {
-        boolean isRunning = false;
         try {
-
-            synchronized (lockRunners) {
-                if(runnerMap.get(streamName) != null) {
-                   isRunning = runnerMap.get(streamName).isRunning();
-                }
+            synchronized (lock) {
+                Runner runner = runnerMap.get(streamName);
+                return runner != null && runner.isRunning();
             }
-
         } catch (Exception ex) {
             logger.error("isRunning() " + ex.getMessage());
+            return false;
         }
-
-        return isRunning;
     }
 
     public boolean stopRunner(String streamName) {
-        boolean isStopped = false;
         try {
-
-            synchronized (lockRunners) {
-                if(runnerMap.get(streamName) != null) {
-                    runnerMap.get(streamName).shutdown();
-                }
+            Runner runner;
+            synchronized (lock) {
+                // remove first so the stream_name is immediately reusable
+                runner = runnerMap.remove(streamName);
             }
-            isStopped = true;
-
+            if (runner != null) {
+                runner.shutdown();
+                return true;
+            }
+            return false;
         } catch (Exception ex) {
             logger.error("stopRunner() " + ex.getMessage());
+            return false;
         }
-
-        return isStopped;
     }
 
     public boolean isRunner(String streamName) {
-        boolean isRunner = false;
         try {
-
-            synchronized (lockRunners) {
-                if(runnerMap.get(streamName) != null) {
-                    isRunner = true;
-                }
+            synchronized (lock) {
+                return runnerMap.containsKey(streamName);
             }
-
-
         } catch (Exception ex) {
             logger.error("isRunner() " + ex.getMessage());
+            return false;
         }
-
-        return isRunner;
     }
 
+    /** Number of configured runners (running or not). */
+    public int getRunnerCount() {
+        synchronized (lock) {
+            return runnerMap.size();
+        }
+    }
 
-
-
+    /** Number of runners currently executing a process. */
+    public int getActiveCount() {
+        int active = 0;
+        synchronized (lock) {
+            for (Runner r : runnerMap.values()) {
+                if (r.isRunning()) active++;
+            }
+        }
+        return active;
+    }
 }

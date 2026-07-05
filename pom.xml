@@ -127,6 +127,17 @@
             <scope>provided</scope>
         </dependency>
 
+        <!-- Felix Health Check API: the executor registers an org.apache.felix.hc.api.HealthCheck
+             OSGi service that the controller's CrescoHealthExecutor discovers. Provisioned as an
+             installed bundle at runtime (same as the controller uses); compile-only here, imported
+             optionally so a minimal deployment without it still resolves. -->
+        <dependency>
+            <groupId>org.apache.felix</groupId>
+            <artifactId>org.apache.felix.healthcheck.api</artifactId>
+            <version>2.0.4</version>
+            <scope>provided</scope>
+        </dependency>
+
     </dependencies>
 
     <build>

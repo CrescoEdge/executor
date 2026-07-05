@@ -8,24 +8,26 @@ import jakarta.jms.MapMessage;
 import jakarta.jms.Message;
 import jakarta.jms.TextMessage;
 import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 public class Runner implements Runnable {
 
-    private PluginBuilder plugin;
-    private CLogger logger;
-    private String command;
-    private String streamName;
-    private boolean running = false;
-    private boolean complete = false;
-    private boolean metrics;
-    private String listenerid;
+    private final PluginBuilder plugin;
+    private final CLogger logger;
+    private final String command;
+    private final String streamName;
+    private final boolean metrics;
+
+    // read/written across threads (run thread, control thread) -> must be visible
+    private volatile boolean running = false;
+    private volatile boolean complete = false;
+    private volatile Process process;
+    private volatile String listenerid;
 
     public Runner(PluginBuilder plugin, String command, String streamName, boolean metrics) {
-
         this.plugin = plugin;
-        logger = plugin.getLogger(ExecutorImpl.class.getName(),CLogger.Level.Info);
-
+        logger = plugin.getLogger(Runner.class.getName(), CLogger.Level.Info);
         this.command = command;
         this.streamName = streamName;
         this.metrics = metrics;
@@ -34,199 +36,138 @@ public class Runner implements Runnable {
     @Override
     public void run() {
         try {
-            logger.debug("Running Runner");
-            logger.debug("Command: [" + command + "]");
-            boolean canRun = false;
-            logger.trace("Checking to see if eligable for running");
-            /*
-            for (String executable : executables)
-                if (command.startsWith(executable))
-                    canRun = true;
-            */
-            canRun = true;
-            logger.debug("canRun = {}", canRun);
-            if (!canRun) return;
+            logger.debug("Running Runner command: [" + command + "]");
             running = true;
-            logger.trace("Setting up ProcessBuilder");
 
-            boolean isInteractive = false;
-            if(command.toLowerCase().contains("-interactive-")) {
-                isInteractive = true;
-            }
+            boolean isInteractive = command.toLowerCase().contains("-interactive-");
+            String osName = System.getProperty("os.name");
+            boolean windows = osName.startsWith("Windows");
 
-            ProcessBuilder pb = null;
-
-            logger.debug(System.getProperty("os.name"));
-            if(isInteractive) {
-
-                pb =  new ProcessBuilder();
-
-                if (System.getProperty("os.name").startsWith("Linux")) {
-                    pb = new ProcessBuilder("/bin/sh", "-i");
-                } else if (System.getProperty("os.name").startsWith("Mac OS X")) {
-                    pb = new ProcessBuilder("/bin/sh", "-i");
-                } else {
-                    pb = new ProcessBuilder("CMD");
-                }
-
+            ProcessBuilder pb;
+            if (isInteractive) {
+                pb = windows ? new ProcessBuilder("CMD") : new ProcessBuilder("/bin/sh", "-i");
             } else {
-                if (System.getProperty("os.name").startsWith("Linux")) {
-                    pb = new ProcessBuilder("/bin/sh", "-c", command);
-                } else if (System.getProperty("os.name").startsWith("Mac OS X")) {
-                    pb = new ProcessBuilder("/bin/sh", "-c", command);
-                }  else {
-                    pb = new ProcessBuilder("CMD", "/C", command);
-                }
+                pb = windows ? new ProcessBuilder("CMD", "/C", command)
+                             : new ProcessBuilder("/bin/sh", "-c", command);
             }
 
-            logger.trace("Starting Process");
-            Process p = pb.start();
+            logger.trace("Starting process");
+            process = pb.start();
 
-            if(metrics) {
-                logger.trace("Starting Metric Collection");
-                RunnerMetrics runnerMetrics = new RunnerMetrics(plugin, command, streamName);
-                new Thread(runnerMetrics).start();
-                //runnerMetrics.start();
+            if (metrics) {
+                // Monitor the exact PID we launched (+ its descendants) instead of matching cmdlines.
+                RunnerMetrics runnerMetrics = new RunnerMetrics(plugin, process.pid(), streamName);
+                Thread mt = new Thread(runnerMetrics, "executor-metrics-" + streamName);
+                mt.setDaemon(true);
+                mt.start();
             }
 
-            logger.debug("Starting Input Listener");
-            createListener(p.getOutputStream(), streamName, "input");
-
-            logger.trace("Starting Output Forwarders");
-            //StreamGobbler errorGobbler = new StreamGobbler(plugin, p.getErrorStream(), streamName, "error");
-            StreamGobbler errorGobbler = new StreamGobbler(plugin, p.getErrorStream(), streamName, "error", "error");
-            StreamGobbler outputGobbler = new StreamGobbler(plugin, p.getInputStream(), streamName, "output", "output");
-
+            // stdin over the dataplane; stdout/stderr forwarded to the dataplane
+            createListener(process.getOutputStream(), streamName, "input");
+            StreamGobbler errorGobbler = new StreamGobbler(plugin, process.getErrorStream(), streamName, "error", "error");
+            StreamGobbler outputGobbler = new StreamGobbler(plugin, process.getInputStream(), streamName, "output", "output");
             errorGobbler.start();
             outputGobbler.start();
 
-
             logger.trace("Waiting for process completion");
-            int exitValue = p.waitFor();
-            logger.trace("Process has completed");
+            int exitValue = process.waitFor();
             complete = true;
             running = false;
+            logger.debug("Process " + streamName + " completed, exit=" + exitValue);
 
-            MapMessage mapMessage = plugin.getAgentService().getDataPlaneService().createMapMessage();
-
+            io.cresco.library.data.DataPlaneService edps = plugin.getAgentService().getDataPlaneService();
+            int eshard = edps.shardFor(streamName);
+            MapMessage mapMessage = edps.createMapMessage();
             mapMessage.setString("cmd", "execution_log");
             mapMessage.setString("ts", Long.toString(new Date().getTime()));
-            mapMessage.setString("log", "[" + new Date() + "] Exit Code: " + Integer.toString(exitValue));
-
-            //set property
-            mapMessage.setStringProperty("pluginname",plugin.getConfig().getStringParam("pluginname"));
-            mapMessage.setStringProperty("region_id",plugin.getRegion());
-            mapMessage.setStringProperty("agent_id",plugin.getAgent());
+            mapMessage.setString("log", "[" + new Date() + "] Exit Code: " + exitValue);
+            mapMessage.setStringProperty("pluginname", plugin.getConfig().getStringParam("pluginname"));
+            mapMessage.setStringProperty("region_id", plugin.getRegion());
+            mapMessage.setStringProperty("agent_id", plugin.getAgent());
             mapMessage.setStringProperty("plugin_id", plugin.getPluginID());
-
             mapMessage.setStringProperty("stream_name", streamName);
             mapMessage.setStringProperty("type", "event");
-
-            plugin.getAgentService().getDataPlaneService().sendMessage(TopicType.AGENT,mapMessage);
+            edps.sendMessage(TopicType.GLOBAL, mapMessage, jakarta.jms.DeliveryMode.NON_PERSISTENT, 0, 0, eshard);
 
             mapMessage.clearBody();
-
             mapMessage.setString("cmd", "delete_exchange");
             mapMessage.setString("ts", Long.toString(new Date().getTime()));
-
-            plugin.getAgentService().getDataPlaneService().sendMessage(TopicType.AGENT,mapMessage);
+            mapMessage.setStringProperty("stream_name", streamName);
+            mapMessage.setStringProperty("type", "event");
+            edps.sendMessage(TopicType.GLOBAL, mapMessage, jakarta.jms.DeliveryMode.NON_PERSISTENT, 0, 0, eshard);
 
         } catch (Exception e) {
-            e.printStackTrace();
+            logger.error("Runner.run() error for " + streamName + ": " + e.getMessage(), e);
+        } finally {
+            running = false;
+            removeListener();
         }
     }
 
-    private void writeString(OutputStream os, String request,
-                             String charsetName) throws IOException {
-        OutputStreamWriter writer = new OutputStreamWriter(os, charsetName);
-        BufferedWriter bw = new BufferedWriter(writer);
+    private void writeString(OutputStream os, String request) throws IOException {
+        // wrap without closing the process stdin; flush each line through
+        Writer bw = new BufferedWriter(new OutputStreamWriter(os, StandardCharsets.UTF_8));
         bw.write(request);
         bw.write("\r\n");
         bw.flush();
     }
 
     private boolean createListener(OutputStream os, String streamName, String streamType) {
-        boolean isCreated = false;
-        try{
+        try {
             String stream_query = "stream_name='" + streamName + "' and type='" + streamType + "'";
-
-            jakarta.jms.MessageListener ml = new jakarta.jms.MessageListener() {
-                public void onMessage(Message msg) {
-                    try {
-
-
-                        if (msg instanceof TextMessage) {
-
-                            String message = ((TextMessage) msg).getText();
-                            logger.debug("INCOMING TO EXEC PLUGIN: " + message);
-                            writeString(os, message, "UTF-8");
-                        }
-                    } catch(Exception ex) {
-
-                        ex.printStackTrace();
+            jakarta.jms.MessageListener ml = msg -> {
+                try {
+                    if (msg instanceof TextMessage) {
+                        String message = ((TextMessage) msg).getText();
+                        logger.debug("stdin -> " + streamName + ": " + message);
+                        writeString(os, message);
                     }
+                } catch (Exception ex) {
+                    logger.error("stdin listener error for " + streamName + ": " + ex.getMessage());
                 }
             };
-            //logger.error("APIDataPlane: creating listener: " + "stream_query=" + stream_query + "");
-            listenerid = plugin.getAgentService().getDataPlaneService().addMessageListener(TopicType.AGENT,ml,stream_query);
-
-            isCreated = true;
-
+            io.cresco.library.data.DataPlaneService dps = plugin.getAgentService().getDataPlaneService();
+            // stdin over the GLOBAL dataplane sharded by stream_name so an external client can feed it
+            listenerid = dps.addMessageListener(TopicType.GLOBAL, ml, stream_query, dps.shardFor(streamName));
+            return true;
         } catch (Exception ex) {
-            ex.printStackTrace();
+            logger.error("createListener error for " + streamName + ": " + ex.getMessage());
+            return false;
         }
-
-        return isCreated;
     }
 
+    private void removeListener() {
+        String id = listenerid;
+        if (id != null) {
+            try {
+                plugin.getAgentService().getDataPlaneService().removeMessageListener(id);
+            } catch (Exception ex) {
+                logger.error("removeListener error for " + streamName + ": " + ex.getMessage());
+            }
+            listenerid = null;
+        }
+    }
 
     public Boolean isRunning() {
         return this.running;
     }
 
     public void shutdown() {
-        if (!complete) {
-            logger.debug("Killing process");
-            try {
-
-                //stop listener
-                Plugin.pluginBuilder.getAgentService().getDataPlaneService().removeMessageListener(listenerid);
-                /*
-                    ProcessBuilder pb = new ProcessBuilder("sudo", "bash", "-c",
-                            "kill -2 $(ps aux | grep '[" +
-                                    exchangeID.charAt(0) + "]" + exchangeID.substring(1) + "' | awk '{print $2}')");
-                  */
-                ProcessBuilder pb = null;
-                logger.debug("Running command on system type: " + System.getProperty("os.name"));
-                if (System.getProperty("os.name").startsWith("Linux")) {
-                    //pb = new ProcessBuilder("sudo", "bash", "-c",
-                    pb = new ProcessBuilder("bash", "-c",
-                            "kill -2 $(ps aux | grep '[" + command.charAt(0) + "]" + command.substring(1) + "' | awk '{print $2}')");
-                } else if (System.getProperty("os.name").startsWith("MacOS") || System.getProperty("os.name").startsWith("Mac OS X"))  {
-                    //pb = new ProcessBuilder("sudo", "bash", "-c",
-                    pb = new ProcessBuilder("bash", "-c",
-                            "kill -2 $(ps aux | grep '[" + command.charAt(0) + "]" + command.substring(1) + "' | awk '{print $2}')");
-                } else if (System.getProperty("os.name").startsWith("Windows")) {
-                    pb = new ProcessBuilder("CMD", "/C", "taskkill","/IM", command, "/F");
-                }
-                else {
-                    pb = new ProcessBuilder("sudo", "bash", "-c",
-                            "kill -2 $(ps aux | grep '[" + command.charAt(0) + "]" + command.substring(1) + "' | awk '{print $2}')");
-                    logger.error("Unknown OS");
-                }
-
-                Process p = pb.start();
-                try {
-                    p.waitFor();
-                    running = false;
-                } catch (InterruptedException e) {
-                    // Todo: Maybe this should be pushed up the stack?
-                    logger.error("InterruptedException: " + e.getMessage());
-                }
-
-            } catch (IOException e) {
-                logger.error("IOException in shutdown() : " + e.getMessage());
+        if (complete) return;
+        logger.debug("Killing process " + streamName);
+        try {
+            Process p = this.process;
+            if (p != null) {
+                // Kill the whole tree via the process handle we launched — no ps/grep/kill string
+                // interpolation (injection-safe) and no risk of killing an unrelated process.
+                p.descendants().forEach(ProcessHandle::destroyForcibly);
+                p.destroyForcibly();
+                // run()'s waitFor() unblocks; its finally removes the stdin listener.
+            } else {
+                running = false;
             }
+        } catch (Exception e) {
+            logger.error("shutdown() error for " + streamName + ": " + e.getMessage());
         }
     }
 }
