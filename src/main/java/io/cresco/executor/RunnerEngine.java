@@ -56,8 +56,10 @@ public class RunnerEngine {
                     logger.error("runRunner: no runner for stream_name " + streamName);
                     return false;
                 }
-                if (runner.isRunning()) {
-                    logger.error("runRunner: runner " + streamName + " is already running");
+                // tryStart() claims the single-use Runner atomically: checking isRunning() raced
+                // (run() sets it asynchronously), letting two threads start on one Runner
+                if (!runner.tryStart()) {
+                    logger.error("runRunner: runner " + streamName + " already started (runners are single-use; stop and recreate to rerun)");
                     return false;
                 }
                 Thread t = new Thread(runner, "executor-runner-" + streamName);

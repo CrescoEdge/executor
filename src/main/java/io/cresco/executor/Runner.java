@@ -21,8 +21,11 @@ public class Runner implements Runnable {
 
     // read/written across threads (run thread, control thread) -> must be visible
     private volatile boolean running = false;
-    private volatile boolean complete = false;
     private volatile Process process;
+    // a Runner is single-use: re-running one instance overwrote the process field and left the
+    // first process orphaned and unkillable; the engine claims it exactly once via tryStart()
+    private final java.util.concurrent.atomic.AtomicBoolean started =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     private volatile String listenerid;
 
     public Runner(PluginBuilder plugin, String command, String streamName, boolean metrics) {
@@ -71,7 +74,6 @@ public class Runner implements Runnable {
 
             logger.trace("Waiting for process completion");
             int exitValue = process.waitFor();
-            complete = true;
             running = false;
             logger.debug("Process " + streamName + " completed, exit=" + exitValue);
 
@@ -152,12 +154,18 @@ public class Runner implements Runnable {
         return this.running;
     }
 
+    /** Claim this Runner for its one and only run; false if it already ran or is running. */
+    public boolean tryStart() {
+        return started.compareAndSet(false, true);
+    }
+
     public void shutdown() {
-        if (complete) return;
         logger.debug("Killing process " + streamName);
         try {
+            // kill unconditionally on a live handle: gating on a completion flag left a
+            // re-run or racing process orphaned while stopRunner reported success
             Process p = this.process;
-            if (p != null) {
+            if (p != null && p.isAlive()) {
                 // Kill the whole tree via the process handle we launched — no ps/grep/kill string
                 // interpolation (injection-safe) and no risk of killing an unrelated process.
                 p.descendants().forEach(ProcessHandle::destroyForcibly);

@@ -8,7 +8,6 @@ import io.cresco.library.utilities.CLogger;
 import io.cresco.library.data.DataPlaneService;
 import jakarta.jms.DeliveryMode;
 import jakarta.jms.TextMessage;
-import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
@@ -40,22 +39,41 @@ public class StreamGobbler extends Thread {
         DataPlaneService dps = plugin.getAgentService().getDataPlaneService();
         int shard = dps.shardFor(streamName);
         // try-with-resources: the reader closes when the process stream reaches EOF (or errors).
-        try (BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
-            String line;
-            // readLine() BLOCKS until a line is available, then returns null at EOF (process exit).
-            // Break on EOF — the old code spun at 500ms until the whole plugin stopped (thread leak),
-            // and slept 50ms per line (capped output at ~20 lines/s). Neither is needed.
-            while (plugin.isActive() && (line = br.readLine()) != null) {
-                logger.debug(gobblerId + " out(" + streamName + "): " + line);
-                TextMessage tm = dps.createTextMessage();
-                tm.setStringProperty("stream_name", streamName);
-                tm.setStringProperty("type", streamType);
-                tm.setText(line);
-                dps.sendMessage(TopicType.GLOBAL, tm, DeliveryMode.NON_PERSISTENT, 0, 0, shard);
+        try (InputStreamReader isr = new InputStreamReader(is, StandardCharsets.UTF_8)) {
+            // Bounded line assembly: readLine() buffered a newline-less stream (e.g. binary or a
+            // giant single line) without limit -> OOM. Lines longer than the cap are emitted in
+            // chunks; the TextMessage-per-line wire contract to stream consumers is unchanged.
+            // read() blocks until data, returns -1 at EOF (process exit) — no spin, no sleep.
+            final int maxLineChars = 64 * 1024;
+            StringBuilder sb = new StringBuilder();
+            int ch;
+            while (plugin.isActive() && (ch = isr.read()) != -1) {
+                if (ch == '\n') {
+                    emitLine(dps, shard, sb.toString());
+                    sb.setLength(0);
+                } else if (ch != '\r') {
+                    sb.append((char) ch);
+                    if (sb.length() >= maxLineChars) {
+                        emitLine(dps, shard, sb.toString());
+                        sb.setLength(0);
+                    }
+                }
+            }
+            if (sb.length() > 0) {
+                emitLine(dps, shard, sb.toString());
             }
         } catch (Exception e) {
             logger.debug("StreamGobbler " + streamType + " for " + streamName + " ended: " + e.getMessage());
         }
         logger.debug("StreamGobbler type=" + streamType + " exited for stream_name=" + streamName);
+    }
+
+    private void emitLine(DataPlaneService dps, int shard, String line) throws Exception {
+        logger.debug(gobblerId + " out(" + streamName + "): " + line);
+        TextMessage tm = dps.createTextMessage();
+        tm.setStringProperty("stream_name", streamName);
+        tm.setStringProperty("type", streamType);
+        tm.setText(line);
+        dps.sendMessage(TopicType.GLOBAL, tm, DeliveryMode.NON_PERSISTENT, 0, 0, shard);
     }
 }
