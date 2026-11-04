@@ -327,6 +327,8 @@ public class ExecutorImpl implements Executor {
             incoming.setParam("status_desc", "at most " + Runner.MAX_STDIN_WRITE + " bytes per write_stdin");
             return incoming;
         }
+        // never what was written: its size, and to which runner
+        logger.debug("write_stdin: " + data.length + " byte(s) to " + streamName);
         Runner.StdinResult res = r.writeStdin(data, "true".equalsIgnoreCase(incoming.getParam("close_stdin")));
         switch (res) {
             case WRITTEN:

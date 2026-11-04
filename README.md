@@ -122,6 +122,8 @@ may configure, start or kill a runner. Exactly what a runner gets, and exactly w
   admin or infra.
 - **Its output is visible on the tenant's dataplane**: any subscriber of `stream_name` in the tenant reads stdout and
   stderr. Do not print secrets.
+- **Never in the agent's log.** The executor logs a runner's id, sizes and counts only: never its command, never what
+  is written to its stdin, never a line of its output, at any log level.
 - **Its processes**: `end_process`, `reset_runners` and plugin stop kill the launcher, the command and all their
   descendants; a child that detaches itself (`setsid`, double fork) can outlive them.
 

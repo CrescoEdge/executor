@@ -49,6 +49,8 @@ class ExecutorTest {
     final List<Message> sent = new CopyOnWriteArrayList<>();
     final Map<String, Object[]> listeners = new ConcurrentHashMap<>();
     volatile long outputDelayMs;
+    /** Every log line the executor wrote, at every level. */
+    final List<String> logged = new CopyOnWriteArrayList<>();
 
     static Object dflt(Class<?> t) {
         if (t == boolean.class) return false;
@@ -88,8 +90,12 @@ class ExecutorTest {
                     }
                 });
         AgentState state = new AgentState(cs);
+        // every line logged, at every level (debug and trace included)
         CLogger log = (CLogger) Proxy.newProxyInstance(CLogger.class.getClassLoader(), new Class<?>[]{CLogger.class},
-                (p, m, a) -> null);
+                (p, m, a) -> {
+                    if (a != null) for (Object o : a) if (o != null) logged.add(m.getName() + ": " + o);
+                    return null;
+                });
         DataPlaneService dp = (DataPlaneService) Proxy.newProxyInstance(DataPlaneService.class.getClassLoader(),
                 new Class<?>[]{DataPlaneService.class}, (p, m, a) -> {
                     switch (m.getName()) {
@@ -360,6 +366,28 @@ class ExecutorTest {
         await(() -> ended("withstdin"), 10_000, "cat ended on the closed stdin");
         List<String> out = output("withstdin");
         assertFalse(out.contains("from the dataplane") || out.contains("from bob") || out.contains("unstamped") || out.contains("forged"), out.toString());
+    }
+
+    @Test
+    void neitherStdinNorOutputIsEverLogged() throws Exception {
+        start();
+        String secretIn = "stdin-secret-" + System.nanoTime();
+        String secretOut = "output-secret-" + System.nanoTime();
+        config("config_process", "stream_name", "quiet", "command", "echo " + secretOut + "; cat", "stdin", "true");
+        exec.executeEXEC(as(exec("run_process", "stream_name", "quiet"), "api:tenant-a/alice", "user"));
+        assertEquals("10", exec.executeEXEC(as(exec("write_stdin", "stream_name", "quiet", "data", secretIn), "api:tenant-a/alice", "user"))
+                .getParam("status"));
+        assertEquals("10", exec.executeEXEC(as(exec("write_stdin", "stream_name", "quiet", "close_stdin", "true"), "api:tenant-a/alice", "user"))
+                .getParam("status"));
+        await(() -> ended("quiet"), 10_000, "the process");
+        assertTrue(output("quiet").containsAll(List.of(secretOut, secretIn)), "precondition: both were forwarded");
+        assertFalse(logged.isEmpty(), "precondition: the executor logs");
+        for (String line : logged) {
+            assertFalse(line.contains(secretIn) || line.contains(secretOut), "a log line holds process content: " + line);
+        }
+        // sizes and counts are logged instead
+        assertTrue(logged.stream().anyMatch(l -> l.contains("byte(s) to quiet")), logged.toString());
+        assertTrue(logged.stream().anyMatch(l -> l.contains("line(s)") && l.contains("quiet")), logged.toString());
     }
 
     @Test

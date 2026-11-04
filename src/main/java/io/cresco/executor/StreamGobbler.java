@@ -19,6 +19,10 @@ public class StreamGobbler extends Thread {
     private final CLogger logger;
     private final String streamType;
     private final String gobblerId;
+    // what was forwarded: counts only. A process's output is never logged, at any level: whoever can raise log
+    // levels must not read what a runner prints
+    private long lines;
+    private long chars;
 
     StreamGobbler(PluginBuilder plugin, InputStream is, String streamName, String streamType, String gobblerId) {
         this.plugin = plugin;
@@ -65,11 +69,13 @@ public class StreamGobbler extends Thread {
         } catch (Exception e) {
             logger.debug("StreamGobbler " + streamType + " for " + streamName + " ended: " + e.getMessage());
         }
-        logger.debug("StreamGobbler type=" + streamType + " exited for stream_name=" + streamName);
+        logger.debug("StreamGobbler type=" + streamType + " exited for stream_name=" + streamName + ": " + lines
+                + " line(s), " + chars + " char(s) forwarded");
     }
 
     private void emitLine(DataPlaneService dps, int shard, String line) throws Exception {
-        logger.debug(gobblerId + " out(" + streamName + "): " + line);
+        lines++;
+        chars += line.length();
         TextMessage tm = dps.createTextMessage();
         tm.setStringProperty("stream_name", streamName);
         tm.setStringProperty("type", streamType);
