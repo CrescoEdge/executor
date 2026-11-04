@@ -48,6 +48,8 @@ public class Runner implements Runnable {
     private final java.util.concurrent.atomic.AtomicBoolean started =
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private final Object stdinLock = new Object();
+    // counted down once the process is launched (and its stdin attached) or failed to launch
+    private final java.util.concurrent.CountDownLatch launched = new java.util.concurrent.CountDownLatch(1);
     private volatile OutputStream stdinStream;
     // the exit code, once the process ended; for tests and status
     private volatile Integer exitCode;
@@ -169,6 +171,7 @@ public class Runner implements Runnable {
             } else {
                 process.getOutputStream().close();
             }
+            launched.countDown();
             errorGobbler = new StreamGobbler(plugin, process.getErrorStream(), streamName, "error", "error");
             outputGobbler = new StreamGobbler(plugin, process.getInputStream(), streamName, "output", "output");
             errorGobbler.start();
@@ -221,6 +224,7 @@ public class Runner implements Runnable {
             logger.error("Runner.run() error for " + streamName + ": " + e.getMessage(), e);
         } finally {
             running = false;
+            launched.countDown();
             closeStdin();
         }
     }
@@ -231,6 +235,14 @@ public class Runner implements Runnable {
     /** Write {@code data} to the process's stdin, then close it if {@code close}. */
     StdinResult writeStdin(byte[] data, boolean close) {
         if (!stdin) return StdinResult.NO_STDIN;
+        if (started.get()) {
+            // started a moment ago: wait (bounded) for the process to be launched and its stdin attached
+            try {
+                launched.await(5, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
+        }
         synchronized (stdinLock) {
             OutputStream os = stdinStream;
             if (os == null || !running) return StdinResult.NOT_RUNNING;
