@@ -306,8 +306,9 @@ class ExecutorTest {
         assertEquals(1, out.size(), out.toString());
         assertTrue(out.get(0).trim().endsWith("sh"), "the parent is the launcher shell: " + out);
         plugin.close();
-        start("runner_user", "cresco-run");
-        assertEquals(List.of("sudo", "-n", "-u", "cresco-run", "--", "/bin/sh", "-c", Runner.LAUNCHER, "cresco-runner"),
+        String me = System.getProperty("user.name");
+        start("runner_user", me);
+        assertEquals(List.of("sudo", "-n", "-u", me, "--", "/bin/sh", "-c", Runner.LAUNCHER, "cresco-runner"),
                 new Runner(plugin, "echo hi", "launch", false).commandLine());
         plugin.close();
         start("runner_user", "root; rm -rf /");
@@ -427,24 +428,32 @@ class ExecutorTest {
         }
     }
 
-    /**
-     * With runner_user, the agent may not signal the runner's processes, and sudo (root) does not relay SIGKILL: the
-     * tree is killed as that user through sudo. A stand-in sudo (that, like sudo, keeps its child as a child and does
-     * not pass SIGKILL on) records how it is called; the process tree must be gone, killed through it.
-     */
-    @Test
-    void endProcessKillsARunnerUsersProcessTreeThroughSudo() throws Exception {
-        Path log = tmp.resolve("sudo.log");
+    /** A stand-in sudo: like sudo, it keeps its child as a child and passes no SIGKILL on; it records each call. */
+    Path fakeSudo(Path log, Path extraPath) throws Exception {
         Path fake = tmp.resolve("fake-sudo");
         java.nio.file.Files.writeString(fake, "#!/bin/sh\n"
                 + "echo \"$*\" >> '" + log + "'\n"
+                + (extraPath == null ? "" : "PATH='" + extraPath + "':$PATH; export PATH\n")
                 + "while [ \"$1\" != \"--\" ]; do shift; done; shift\n"
                 + "\"$@\"; exit $?\n");
         assertTrue(fake.toFile().setExecutable(true));
+        return fake;
+    }
+
+    /**
+     * With runner_user, the agent may not signal the runner's processes, and sudo (root) does not relay SIGKILL: the
+     * tree is killed as that user through sudo. Here (macOS) there is no setsid, so the runner has no process group of
+     * its own and its processes are killed by pid.
+     */
+    @Test
+    void endProcessKillsARunnerUsersProcessTreeThroughSudo() throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(!onPath("setsid"), "with setsid, the group test below applies");
+        Path log = tmp.resolve("sudo.log");
         String saved = Runner.sudo;
-        Runner.sudo = fake.toString();
+        Runner.sudo = fakeSudo(log, null).toString();
+        String me = System.getProperty("user.name");
         try {
-            start("runner_user", "cresco-run");
+            start("runner_user", me);
             config("config_process", "stream_name", "long", "command", "sleep 300");
             run("long");
             Runner r = engine.get("long");
@@ -455,11 +464,75 @@ class ExecutorTest {
             assertNotNull(end);
             await(() -> tree.stream().noneMatch(ProcessHandle::isAlive), 10_000, "the runner's process tree killed");
             String calls = java.nio.file.Files.readString(log);
-            assertTrue(calls.contains("-n -u cresco-run -- /bin/sh -c kill -KILL"), "killed through sudo as the runner user: " + calls);
+            assertTrue(calls.contains("-n -u " + me + " -- /bin/sh -c kill -KILL \"$@\""), "killed through sudo as the runner user: " + calls);
             await(() -> ended("long"), 10_000, "the runner reported ended");
         } finally {
             Runner.sudo = saved;
         }
+    }
+
+    /**
+     * Where setsid exists the runner leads its own process group, and end_process kills that GROUP as the runner user
+     * (kill -KILL -- -pgid): a group id is never reused while the group lives, so no other process can be hit. Here a
+     * stand-in setsid (perl's POSIX::setsid) gives macOS the same; the command starts two processes.
+     */
+    @Test
+    void endProcessKillsARunnerUsersProcessGroupThroughSudo() throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(new java.io.File("/usr/bin/perl").canExecute(), "needs perl for a stand-in setsid");
+        Path bin = java.nio.file.Files.createDirectories(tmp.resolve("bin"));
+        Path setsid = bin.resolve("setsid");
+        java.nio.file.Files.writeString(setsid, "#!/bin/sh\nexec /usr/bin/perl -e 'use POSIX (); POSIX::setsid() or die \"setsid: $!\"; exec { $ARGV[0] } @ARGV or die' \"$@\"\n");
+        assertTrue(setsid.toFile().setExecutable(true));
+        Path log = tmp.resolve("sudo.log");
+        String saved = Runner.sudo;
+        Runner.sudo = fakeSudo(log, bin).toString();
+        String me = System.getProperty("user.name");
+        try {
+            start("runner_user", me);
+            config("config_process", "stream_name", "grp", "command", "sleep 301 & sleep 302");
+            run("grp");
+            Runner r = engine.get("grp");
+            await(() -> descendants(r).stream().filter(h -> h.info().command().orElse("").endsWith("sleep")).count() == 2,
+                    10_000, "two sleeps running in the runner's own group");
+            List<ProcessHandle> tree = descendants(r);
+            assertFalse(Runner.runnerGroups(tree, Runner.uidOf(me)).isEmpty(), "precondition: the runner leads a group");
+            config("end_process", "stream_name", "grp");
+            await(() -> tree.stream().noneMatch(ProcessHandle::isAlive), 10_000, "the runner's process group killed");
+            String calls = java.nio.file.Files.readString(log);
+            assertTrue(calls.matches("(?s).*kill -KILL -- \"\\$@\" 2>/dev/null; exit 0 cresco-kill -[0-9]+.*"),
+                    "killed as a process group: " + calls);
+            await(() -> ended("grp"), 10_000, "the runner reported ended");
+        } finally {
+            Runner.sudo = saved;
+        }
+    }
+
+    @Test
+    void runnerUserMustBeARealUserThatIsNotRoot() {
+        start("runner_user", "no-such-user-" + Long.toHexString(System.nanoTime()).substring(0, 8));
+        assertThrows(IllegalStateException.class, new Runner(plugin, "id", "x", false)::runnerUser);
+        plugin.close();
+        start("runner_user", System.getProperty("user.name"));
+        assertEquals(System.getProperty("user.name"), new Runner(plugin, "id", "x", false).runnerUser());
+    }
+
+    @Test
+    void theLauncherKeepsTrailingNewlinesAndNamesItselfCrescoCommand() throws Exception {
+        start();
+        // a here-document that runs to the end of the command: its trailing empty lines are part of it, and arrive
+        config("config_process", "stream_name", "nl", "command", "echo \"$0\"; cat <<'EOF' | wc -l\na\n\n\n");
+        run("nl");
+        await(() -> ended("nl"), 10_000, "nl");
+        List<String> out = output("nl");
+        assertEquals("cresco-command", out.get(0).trim());
+        assertEquals("3", out.get(1).trim(), "the here-document's three lines, empty ones included");
+    }
+
+    static boolean onPath(String exe) {
+        for (String d : System.getenv().getOrDefault("PATH", "").split(":")) {
+            if (new java.io.File(d, exe).canExecute()) return true;
+        }
+        return false;
     }
 
     /** The same, for real, as another OS user: runs only where CRESCO_TEST_RUNNER_USER names one sudo -n can run. */

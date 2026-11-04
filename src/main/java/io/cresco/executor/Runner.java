@@ -29,12 +29,20 @@ public class Runner implements Runnable {
     /** Bound on one write_stdin. */
     static final int MAX_STDIN_WRITE = 64 * 1024;
     /**
-     * The launcher: a shell that stays the parent of a command shell, which reads the command from its stdin (a byte
-     * count on one line, then exactly that many bytes) and runs it, so the command is never in any process's arguments
-     * ({@code ps}) nor in sudo's log. What follows on stdin is the command's own stdin.
+     * What the command shell runs: it reads the command from its stdin (a byte count on one line, then exactly that many
+     * bytes, trailing newlines kept: the "x" sentinel stops command substitution from stripping them) and evaluates it.
+     * Its {@code $0} is {@code cresco-command}. What follows on stdin is the command's own stdin.
      */
-    static final String LAUNCHER = "/bin/sh -c 'IFS= read -r n || exit 126; case $n in \"\"|*[!0-9]*) exit 126;; esac; "
-            + "c=$(dd bs=1 count=\"$n\" 2>/dev/null); eval \"$c\"' cresco-command; exit $?";
+    static final String READER = "IFS= read -r n || exit 126; case $n in \"\"|*[!0-9]*) exit 126;; esac; "
+            + "c=$(dd bs=1 count=\"$n\" 2>/dev/null; echo x); c=${c%x}; eval \"$c\"";
+    /**
+     * The launcher: a shell that stays the parent of the command shell. Where {@code setsid} exists (Linux), the command
+     * shell leads a session and process group of its own, so the runner's processes are killed as one group (never by
+     * pid, which another process may have reused); elsewhere (macOS) it is an ordinary child. The command is never in any
+     * process's arguments ({@code ps}) nor in sudo's log.
+     */
+    static final String LAUNCHER = "if command -v setsid >/dev/null 2>&1; then setsid /bin/sh -c '" + READER
+            + "' cresco-command; else /bin/sh -c '" + READER + "' cresco-command; fi; exit $?";
     /** The sudo binary (tests replace it with a stand-in). */
     static volatile String sudo = "sudo";
 
@@ -149,10 +157,27 @@ public class Runner implements Runnable {
     String runnerUser() {
         String user = plugin.getConfig().getStringParam("runner_user");
         if (user == null || user.trim().isEmpty()) return null;
-        if (!USER_NAME.matcher(user.trim()).matches()) {
+        user = user.trim();
+        if (!USER_NAME.matcher(user).matches()) {
             throw new IllegalStateException("runner_user must be an OS user name ([a-z_][a-z0-9_-]{0,31})");
         }
-        return user.trim();
+        if ("root".equals(user)) throw new IllegalStateException("runner_user may never be root");
+        Long uid = uidOf(user);
+        if (uid == null) throw new IllegalStateException("runner_user " + user + " is not a user of this host (id -u)");
+        if (uid == 0L) throw new IllegalStateException("runner_user " + user + " has uid 0: it may never be root");
+        return user;
+    }
+
+    /** The uid of {@code user} ({@code id -u}), or null when it cannot be told. */
+    static Long uidOf(String user) {
+        try {
+            Process id = new ProcessBuilder("id", "-u", user).redirectErrorStream(true).start();
+            String out = new String(id.getInputStream().readAllBytes(), StandardCharsets.US_ASCII).trim();
+            if (!id.waitFor(10, java.util.concurrent.TimeUnit.SECONDS) || id.exitValue() != 0) return null;
+            return Long.parseLong(out);
+        } catch (Exception ex) {
+            return null;
+        }
     }
 
     /**
@@ -370,8 +395,13 @@ public class Runner implements Runnable {
                 p.descendants().forEach(tree::add);
                 String user = runAs;
                 if (user != null) {
-                    killAs(user, tree);
+                    // by process group where the runner has its own (setsid): a group id is never reused while the
+                    // group lives, so no other process can be hit; by pid only where it has none (macOS)
+                    List<Long> groups = runnerGroups(tree, uidOf(user));
+                    if (!groups.isEmpty()) killGroupsAs(user, groups);
+                    else killAs(user, tree);
                 } else {
+                    // ProcessHandle checks each process's start time: a reused pid is never signalled
                     tree.forEach(ProcessHandle::destroyForcibly);
                 }
                 p.destroyForcibly();
@@ -390,13 +420,57 @@ public class Runner implements Runnable {
         }
     }
 
-    /** SIGKILL {@code tree} as {@code user}, through sudo; the pids are arguments, never shell text. */
+    /**
+     * The process groups the runner's processes lead, among {@code tree}: those whose group id is their own pid and that
+     * run as {@code uid} (the runner user), as {@code ps} reports them. Empty when none (no setsid here).
+     */
+    static List<Long> runnerGroups(List<ProcessHandle> tree, Long uid) {
+        List<Long> out = new ArrayList<>();
+        if (tree.isEmpty() || uid == null) return out;
+        StringBuilder pids = new StringBuilder();
+        for (ProcessHandle h : tree) {
+            if (pids.length() > 0) pids.append(',');
+            pids.append(h.pid());
+        }
+        try {
+            Process ps = new ProcessBuilder("ps", "-o", "pid=,pgid=,uid=", "-p", pids.toString()).redirectErrorStream(true).start();
+            String text = new String(ps.getInputStream().readAllBytes(), StandardCharsets.US_ASCII);
+            ps.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
+            for (String line : text.split("\n")) {
+                String[] f = line.trim().split("\\s+");
+                if (f.length < 3) continue;
+                try {
+                    long pid = Long.parseLong(f[0]), pgid = Long.parseLong(f[1]), u = Long.parseLong(f[2]);
+                    if (pid == pgid && u == uid) out.add(pgid);
+                } catch (NumberFormatException ignore) {
+                }
+            }
+        } catch (Exception ex) {
+            return new ArrayList<>();
+        }
+        return out;
+    }
+
+    /** SIGKILL the process groups {@code groups} as {@code user}, through sudo ({@code kill -KILL -- -<pgid>}). */
+    private void killGroupsAs(String user, List<Long> groups) throws IOException, InterruptedException {
+        List<String> cmd = new ArrayList<>();
+        Collections.addAll(cmd, sudo, "-n", "-u", user, "--", "/bin/sh", "-c", "kill -KILL -- \"$@\" 2>/dev/null; exit 0",
+                "cresco-kill");
+        for (Long g : groups) cmd.add("-" + g);
+        runKill(user, cmd);
+    }
+
+    /** SIGKILL {@code tree} as {@code user}, through sudo, by pid (where the runner has no process group of its own). */
     private void killAs(String user, List<ProcessHandle> tree) throws IOException, InterruptedException {
         if (tree.isEmpty()) return;
         List<String> cmd = new ArrayList<>();
         Collections.addAll(cmd, sudo, "-n", "-u", user, "--", "/bin/sh", "-c", "kill -KILL \"$@\" 2>/dev/null; exit 0",
                 "cresco-kill");
         for (ProcessHandle h : tree) cmd.add(String.valueOf(h.pid()));
+        runKill(user, cmd);
+    }
+
+    private void runKill(String user, List<String> cmd) throws IOException, InterruptedException {
         ProcessBuilder pb = new ProcessBuilder(cmd);
         RunnerEnvironment.apply(pb.environment(), RunnerEnvironment.MINIMAL);
         pb.redirectErrorStream(true);
