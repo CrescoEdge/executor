@@ -1,4 +1,0 @@
--------------------------------------------------------------------------------
-Test set: io.cresco.executor.ExecutorTest
--------------------------------------------------------------------------------
-Tests run: 8, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 1.175 s -- in io.cresco.executor.ExecutorTest
