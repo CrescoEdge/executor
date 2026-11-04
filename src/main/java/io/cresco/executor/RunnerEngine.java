@@ -33,18 +33,34 @@ public class RunnerEngine {
     }
 
     public boolean createRunner(String runCommand, String streamName, boolean asSudo, boolean metrics) {
+        return create(runCommand, streamName, metrics, false) != null;
+    }
+
+    /**
+     * Register a runner (not started). Null when the stream name is taken or invalid. {@code stdin}: the process takes
+     * stdin over the dataplane, of the runner's own {@link Runner#getStdinType()} only.
+     */
+    public Runner create(String runCommand, String streamName, boolean metrics, boolean stdin) {
         try {
             synchronized (lock) {
                 if (runnerMap.containsKey(streamName)) {
                     logger.error("createRunner: runner already exists for stream_name " + streamName);
-                    return false;
+                    return null;
                 }
-                runnerMap.put(streamName, new Runner(plugin, runCommand, streamName, metrics));
+                Runner r = new Runner(plugin, runCommand, streamName, metrics, stdin);
+                runnerMap.put(streamName, r);
+                return r;
             }
-            return true;
         } catch (Exception ex) {
             logger.error("createRunner() " + ex.getMessage());
-            return false;
+            return null;
+        }
+    }
+
+    /** The runner registered under {@code streamName}, or null. */
+    Runner get(String streamName) {
+        synchronized (lock) {
+            return runnerMap.get(streamName);
         }
     }
 

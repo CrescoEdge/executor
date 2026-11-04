@@ -127,6 +127,13 @@
             <scope>provided</scope>
         </dependency>
 
+        <!-- test scope only (version from cresco-parent); never embedded in the bundle -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+
         <!-- Felix Health Check API: the executor registers an org.apache.felix.hc.api.HealthCheck
              OSGi service that the controller's CrescoHealthExecutor discovers. Provisioned as an
              installed bundle at runtime (same as the controller uses); compile-only here, imported

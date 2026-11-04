@@ -14,20 +14,22 @@ import java.util.UUID;
               "stdout/stderr over the dataplane (stream_name) and accepting stdin over the dataplane; " +
               "optional per-process OSHI metrics.")
 @CrescoActions({
-    @CrescoAction(name = "config_process", type = "CONFIG",
+    @CrescoAction(name = "config_process", roles = {"infra", "admin"}, type = "CONFIG",
         summary = "Register a process/shell runner (does not start it).",
         why = "Prepare a command to run on the edge; its stdio will ride the dataplane under stream_name.",
         params = {
             @CrescoParam(name = "stream_name", required = true, description = "unique runner id + dataplane stdio stream_name"),
             @CrescoParam(name = "command", required = true, description = "shell command to run (e.g. 'tcpdump -w - port 514', 'docker run ...')"),
-            @CrescoParam(name = "metrics", type = "boolean", description = "true to collect per-process OSHI metrics")},
-        returns = @CrescoReturn(name = "config_status", description = "true on success")),
-    @CrescoAction(name = "run_process", type = "EXEC",
+            @CrescoParam(name = "metrics", type = "boolean", description = "true to collect per-process OSHI metrics"),
+            @CrescoParam(name = "stdin", type = "boolean", description = "true to take stdin over the dataplane (an interactive command always does)")},
+        returns = {@CrescoReturn(name = "config_status", description = "true on success"),
+                   @CrescoReturn(name = "stdin_type", description = "the dataplane type stdin must carry (input_id), when stdin is taken")}),
+    @CrescoAction(name = "run_process", roles = {"infra", "admin"}, type = "EXEC",
         summary = "Start a configured runner; its stdout/stderr stream over the dataplane as stream_name.",
         why = "Begin execution and stream live output back over the mesh.",
         params = @CrescoParam(name = "stream_name", required = true, description = "runner id"),
         returns = @CrescoReturn(name = "status", description = "true on success")),
-    @CrescoAction(name = "start_process", type = "CONFIG",
+    @CrescoAction(name = "start_process", roles = {"infra", "admin"}, type = "CONFIG",
         summary = "Start a configured runner (CONFIG channel variant of run_process).",
         why = "Begin execution of a prepared runner.",
         params = @CrescoParam(name = "stream_name", required = true, description = "runner id"),
@@ -37,12 +39,12 @@ import java.util.UUID;
         why = "Poll process liveness.",
         params = @CrescoParam(name = "stream_name", required = true, description = "runner id"),
         returns = @CrescoReturn(name = "run_status", description = "true if running")),
-    @CrescoAction(name = "end_process", type = "CONFIG",
+    @CrescoAction(name = "end_process", roles = {"infra", "admin"}, type = "CONFIG",
         summary = "Stop/kill a runner.",
         why = "Terminate a running process.",
         params = @CrescoParam(name = "stream_name", required = true, description = "runner id"),
         returns = @CrescoReturn(name = "end_status", description = "true on success")),
-    @CrescoAction(name = "reset_runners", type = "CONFIG",
+    @CrescoAction(name = "reset_runners", roles = {"infra", "admin"}, type = "CONFIG",
         summary = "Stop all runners on this executor.",
         why = "Tear down every process this plugin is running.",
         returns = @CrescoReturn(name = "reset_status", description = "true on success")),
@@ -84,22 +86,33 @@ public class ExecutorImpl implements Executor {
 
         switch (action) {
             case "config_process":
-                logger.debug("{} command received", incoming.getParam("command"));
+                // the command itself is never logged: it may carry credentials
+                logger.debug("config_process for stream_name " + streamName);
 
                 if(streamName != null) {
-                    if(runnerEngine.isRunner(streamName)) {
+                    if (!Runner.STREAM_NAME.matcher(streamName).matches()) {
+                        incoming.setParam("error", Boolean.toString(true));
+                        incoming.setParam("error_msg", "stream_name must match " + Runner.STREAM_NAME.pattern());
+                        incoming.setParam("config_status", Boolean.toString(false));
+                    } else if(runnerEngine.isRunner(streamName)) {
                             logger.error("Trying to create runner, but runner != null, STOP first.");
                             incoming.setParam("error", Boolean.toString(true));
                             incoming.setParam("error_msg", "Runner already exist stream_name: " + streamName);
                             incoming.setParam("config_status", Boolean.toString(false));
                     } else {
                         if(incoming.getParam("command") != null) {
-                            if(incoming.getParam("metrics") != null) {
-                                runnerEngine.createRunner(incoming.getParam("command"),streamName,true, Boolean.parseBoolean(incoming.getParam("metrics")));
+                            boolean metrics = Boolean.parseBoolean(incoming.getParam("metrics"));
+                            boolean stdin = Boolean.parseBoolean(incoming.getParam("stdin"));
+                            Runner r = runnerEngine.create(incoming.getParam("command"), streamName, metrics, stdin);
+                            if (r == null) {
+                                incoming.setParam("error", Boolean.toString(true));
+                                incoming.setParam("error_msg", "runner not created for stream_name: " + streamName);
+                                incoming.setParam("config_status", Boolean.toString(false));
                             } else {
-                                runnerEngine.createRunner(incoming.getParam("command"),streamName,true,false);
+                                // only the caller that configured the runner learns the type its stdin must carry
+                                if (r.getStdinType() != null) incoming.setParam("stdin_type", r.getStdinType());
+                                incoming.setParam("config_status", Boolean.toString(true));
                             }
-                            incoming.setParam("config_status", Boolean.toString(true));
                         } else {
                             logger.error("Must provide command");
                             incoming.setParam("error", Boolean.toString(true));
@@ -202,7 +215,6 @@ public class ExecutorImpl implements Executor {
 
         switch (action) {
             case "run_process":
-                logger.debug("{} command received", incoming.getParam("command"));
 
                 if(streamName == null) {
                     incoming.setParam("error", Boolean.toString(true));
