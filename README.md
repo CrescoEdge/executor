@@ -62,10 +62,10 @@ it names a dataplane stream, a selector value and a directory.
 |---|---|---|
 | `stream_name` + `command` | *(unset)* | If both set at load, a runner is auto-created and started. |
 | `metrics` | `false` | Collect per-process OSHI metrics (streamed live on the dataplane). |
-| `runner_workdir` | `<plugin data dir>/runners` | Where each runner's own working directory (`<runner_workdir>/<stream_name>`) is made. |
+| `runner_workdir` | `<plugin data dir>/runners` | Where each runner's own working directory (`<runner_workdir>/<stream_name>`, with `:` and upper-case letters written `%xx`) is made. |
 | `runner_env` | `scrubbed` | A runner's environment, an **allowlist**: `scrubbed` (PATH, HOME, USER, LOGNAME, SHELL, LANG, LC_*, TZ, TMPDIR, TERM, plus `runner_env_allow`), `minimal` (PATH, HOME, LANG, LC_*, TZ), or `inherit` (everything, secrets included: WARNING). Anything else refuses to run. |
 | `runner_env_allow` | *(unset)* | Extra variable names `scrubbed` passes; a `CRESCO_*`, JVM option (`*_OPTS`, `JAVA_TOOL_OPTIONS`...), `*PWD`/`*PASSWD` or secret-named variable is never passed, even if listed. |
-| `runner_user` | *(unset)* | Run every runner as this OS user (`sudo -n -u <user>`; the agent's user needs a sudoers rule allowing it, without a password). The only real boundary between a runner and the agent: see "What a runner can reach". |
+| `runner_user` | *(unset)* | Run every runner as this OS user (`sudo -n -u <user> -- /bin/sh ...`; the agent's user needs a sudoers rule allowing it to run `/bin/sh` as that user without a password, e.g. `agent ALL=(runner) NOPASSWD: /bin/sh`). The same rule kills the runner's processes (`end_process`). The only real boundary between a runner and the agent: see "What a runner can reach". |
 | `drain_ms` | `10000` | How long, after the process exits, its output may still be forwarded before the exit events are sent. |
 | `enable_executor` | `true` | Agent-level auto-load gate. |
 
@@ -83,10 +83,13 @@ it names a dataplane stream, a selector value and a directory.
 
 ## Safeguards & robustness
 
-- **Injection-safe, precise kill** — `end_process` kills the process **and its descendants** via the
-  JVM `ProcessHandle` we launched (`destroyForcibly`), never by interpolating the command into a
-  `ps | grep | kill` shell string (which was both a shell-injection vector and could kill the wrong
-  process). The runner thread never hangs waiting on a missed kill.
+- **Injection-safe, precise kill** — `end_process` kills the process **and its descendants** (the tree under the
+  `ProcessHandle` we launched, as it is at that moment), never by interpolating the command into a `ps | grep | kill`
+  shell string. As the agent's user the tree is killed directly (`destroyForcibly`). With `runner_user`, the agent may
+  signal neither that user's processes nor sudo (root, which does not relay SIGKILL), so the tree is killed as that
+  user: `sudo -n -u <user> -- /bin/sh -c 'kill -KILL "$@"' cresco-kill <pids>` (the pids are arguments, never shell
+  text), with the sudoers rule the launcher already needs; sudo exits when its child is gone. A failure (no such rule)
+  is logged as an ERROR naming the rule.
 - **No thread/handle leaks** — stdout/stderr readers exit on EOF (no busy-spin, no per-line throttle);
   stdin is closed when the process ends (not only on kill); metrics/gobbler/
   runner threads are named daemons; `isStopped()` kills every running process so nothing is orphaned.
@@ -102,8 +105,8 @@ it names a dataplane stream, a selector value and a directory.
 `executor` runs arbitrary shell commands by design — it is a remote execution surface, so only `infra` and `admin`
 may configure, start or kill a runner. Exactly what a runner gets, and exactly where the boundary is:
 
-- **The agent's OS user, unless `runner_user` is set.** The command runs through a launcher shell
-  (`/bin/sh -c '/bin/sh -c "$1"; exit $?'`, or `CMD /C`) as the user the agent runs as. **It can read and write
+- **The agent's OS user, unless `runner_user` is set.** The command runs through a launcher shell (`/bin/sh`, or
+  `CMD /C` on Windows) as the user the agent runs as. **It can read and write
   whatever that user can** — the agent's data directory, keystores and secret files — and it can read the agent JVM's
   own environment by inspecting that process (`ps -E -p <agent pid>` on macOS, `/proc/<agent pid>/environ` on Linux),
   because a process may read another process of the same user. There is no sandbox, chroot, container or privilege
@@ -113,8 +116,14 @@ may configure, start or kill a runner. Exactly what a runner gets, and exactly w
 - **A launcher, not the agent JVM, as its parent.** The launcher shell has the runner's own environment, so the
   command's parent process holds no more than the command does. This removes the obvious route (`$PPID`); it is not a
   boundary against the agent's user (above).
-- **Its own working directory**, `<runner_workdir>/<stream_name>` (a `:` in the name becomes `%3A`, so two runners
-  never share one). A starting point, not a jail: the command can `cd` anywhere its user can.
+- **Its command line is not published.** The launcher's arguments are a fixed script: the command is written to the
+  launcher's stdin (its length, then the bytes) and read there, so the command text is in no process's arguments
+  (`ps`, `/proc/*/cmdline`) and not in sudo's log (sudo logs the fixed launcher only). What the command itself runs
+  has its own arguments, visible as any process's are. (On Windows, `CMD /C <command>` still carries it.)
+- **Its own working directory**, `<runner_workdir>/<name>`, where the name is the stream name with `:` and every
+  upper-case letter written as `%` and two hex digits (`Job` is `%4aob`, `job:1` is `job%3a1`), so two runners never
+  share one, even on a filesystem that ignores case (macOS, Windows). A starting point, not a jail: the command can
+  `cd` anywhere its user can.
 - **An allowlisted environment** (`runner_env=scrubbed`): only PATH, HOME, USER, LOGNAME, SHELL, LANG, LC_*, TZ, TMPDIR
   and TERM, plus names an admin adds with `runner_env_allow` (never a `CRESCO_*`, JVM option, password or
   secret-named one). Before 1.3 hardening it inherited the agent's whole environment.
@@ -125,7 +134,8 @@ may configure, start or kill a runner. Exactly what a runner gets, and exactly w
 - **Never in the agent's log.** The executor logs a runner's id, sizes and counts only: never its command, never what
   is written to its stdin, never a line of its output, at any log level.
 - **Its processes**: `end_process`, `reset_runners` and plugin stop kill the launcher, the command and all their
-  descendants; a child that detaches itself (`setsid`, double fork) can outlive them.
+  descendants, with `runner_user` too (as that user, through sudo); a child that detaches itself (`setsid`, double
+  fork, re-parented to init) can outlive them.
 
 ## Upgrade notes (1.3 hardening)
 
@@ -137,7 +147,12 @@ may configure, start or kill a runner. Exactly what a runner gets, and exactly w
   a WARNING).
 - Stdin must be requested (`stdin=true`) and is written with `write_stdin` by the caller that started the runner (or an
   admin or infra). Dataplane frames no longer reach a process's stdin.
-- A runner's command runs under a launcher shell: it is the command's parent, so `$PPID` is the launcher.
+- A runner's command runs under a launcher shell: it is the command's parent, so `$PPID` is the launcher. The command
+  reaches the launcher on its stdin, so it no longer appears in `ps` or in sudo's log.
+- Working directories of stream names with upper-case letters or `:` are now `%xx`-encoded (`Job` is `%4aob`,
+  `job:1` is `job%3a1`): files a command left in the old directory stay there.
+- With `runner_user`, the sudoers rule must allow `/bin/sh` as that user: it starts the launcher and kills the
+  runner's processes.
 - Set `runner_user` (and a sudoers rule) to run runners as another OS user: the only boundary between a runner and the
   agent's own files and environment.
 - `stream_name` is validated; names with spaces, quotes, slashes or a leading `.` are refused.
@@ -147,9 +162,11 @@ may configure, start or kill a runner. Exactly what a runner gets, and exactly w
 
 - `mvn test` — the role table, the whole output tail before the exit events (with a slow consumer), a background
   child not holding the exit event, the runner's working directory (distinct for every name), the allowlisted
-  environments, the launcher as the command's parent (and `runner_user`'s command line), stdin written only by the
-  starter, an admin or infra and never from the dataplane, and stream names that could widen a selector or leave the
-  runner's directory. The adversarial review's tests are part of the suite; one reads the parent's environment and
+  environments, the launcher as the command's parent (and `runner_user`'s command line), the command in no process's
+  arguments, case-safe working directories, `end_process` killing a `runner_user` runner's tree through sudo (with a
+  stand-in sudo that, like sudo, does not pass SIGKILL on; and, where `CRESCO_TEST_RUNNER_USER` names a user
+  `sudo -n` may run `/bin/sh` as, for real), stdin written only by the starter, an admin or infra and never from the
+  dataplane, and stream names that could widen a selector or leave the runner's directory. The adversarial review's tests are part of the suite; one reads the parent's environment and
   needs a `CRESCO_*` variable set (e.g. `CRESCO_REVIEW_SECRET=x mvn test`).
 - `run/tests/executor_test.py` — lifecycle + **real-kill verification** + dataplane output streaming +
   central metrics (`getmetrics`/`getmetricinventory`). 11/11.

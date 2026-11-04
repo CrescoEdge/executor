@@ -293,7 +293,8 @@ class ExecutorTest {
         start();
         Runner r = new Runner(plugin, "echo hi", "launch", false);
         List<String> line = r.commandLine();
-        assertEquals(List.of("/bin/sh", "-c", "/bin/sh -c \"$1\"; exit $?", "cresco-runner", "echo hi"), line);
+        // the command is not on the command line: the launcher reads it from its stdin
+        assertEquals(List.of("/bin/sh", "-c", Runner.LAUNCHER, "cresco-runner"), line);
         // the command's parent is the launcher shell, not this JVM
         config("config_process", "stream_name", "ppid", "command", "ps -o comm= -p $PPID");
         run("ppid");
@@ -303,8 +304,8 @@ class ExecutorTest {
         assertTrue(out.get(0).trim().endsWith("sh"), "the parent is the launcher shell: " + out);
         plugin.close();
         start("runner_user", "cresco-run");
-        assertEquals(List.of("sudo", "-n", "-u", "cresco-run", "--", "/bin/sh", "-c", "/bin/sh -c \"$1\"; exit $?",
-                "cresco-runner", "echo hi"), new Runner(plugin, "echo hi", "launch", false).commandLine());
+        assertEquals(List.of("sudo", "-n", "-u", "cresco-run", "--", "/bin/sh", "-c", Runner.LAUNCHER, "cresco-runner"),
+                new Runner(plugin, "echo hi", "launch", false).commandLine());
         plugin.close();
         start("runner_user", "root; rm -rf /");
         Runner bad = new Runner(plugin, "echo hi", "launch", false);
@@ -388,6 +389,99 @@ class ExecutorTest {
         // sizes and counts are logged instead
         assertTrue(logged.stream().anyMatch(l -> l.contains("byte(s) to quiet")), logged.toString());
         assertTrue(logged.stream().anyMatch(l -> l.contains("line(s)") && l.contains("quiet")), logged.toString());
+    }
+
+    @Test
+    void theCommandIsNeverInAnyProcessArgumentsAndRunsExactly() throws Exception {
+        start();
+        String marker = "cresco-marker-" + Long.toHexString(System.nanoTime());
+        // a comment carrying the marker: it is part of the command, never of what the command runs
+        config("config_process", "stream_name", "argv", "command", "sleep 2 # " + marker);
+        run("argv");
+        Thread.sleep(700);
+        Process ps = new ProcessBuilder("ps", "-axww", "-o", "args=").redirectErrorStream(true).start();
+        String all = new String(ps.getInputStream().readAllBytes());
+        ps.waitFor();
+        assertTrue(all.contains("cresco-runner"), "precondition: the launcher is running");
+        assertFalse(all.contains(marker), "the command text is visible in a process's arguments");
+        await(() -> ended("argv"), 10_000, "argv");
+        // quoting, several lines and non-ASCII text arrive exactly
+        config("config_process", "stream_name", "exact", "command", "printf '%s|' \"a  b\" '$HOME'\necho \"\u00fc\u00f1\u00ee\"");
+        run("exact");
+        await(() -> ended("exact"), 10_000, "exact");
+        assertEquals(List.of("a  b|$HOME|\u00fc\u00f1\u00ee"), output("exact"));
+    }
+
+    @Test
+    void streamNamesMapToDirectoriesOneToOneWhateverTheCase() {
+        assertEquals("%4aob", Runner.dirName("Job"));
+        assertEquals("job", Runner.dirName("job"));
+        assertEquals("job%3a1", Runner.dirName("job:1"));
+        assertEquals("job_1", Runner.dirName("job_1"));
+        Set<String> seen = new HashSet<>();
+        for (String n : new String[]{"Job", "job", "JOB", "jOb", "job:1", "job_1", "a.b", "A.b", "x-1", "X-1"}) {
+            assertTrue(seen.add(Runner.dirName(n).toLowerCase(java.util.Locale.ROOT)), n);
+        }
+    }
+
+    /**
+     * With runner_user, the agent may not signal the runner's processes, and sudo (root) does not relay SIGKILL: the
+     * tree is killed as that user through sudo. A stand-in sudo (that, like sudo, keeps its child as a child and does
+     * not pass SIGKILL on) records how it is called; the process tree must be gone, killed through it.
+     */
+    @Test
+    void endProcessKillsARunnerUsersProcessTreeThroughSudo() throws Exception {
+        Path log = tmp.resolve("sudo.log");
+        Path fake = tmp.resolve("fake-sudo");
+        java.nio.file.Files.writeString(fake, "#!/bin/sh\n"
+                + "echo \"$*\" >> '" + log + "'\n"
+                + "while [ \"$1\" != \"--\" ]; do shift; done; shift\n"
+                + "\"$@\"; exit $?\n");
+        assertTrue(fake.toFile().setExecutable(true));
+        String saved = Runner.sudo;
+        Runner.sudo = fake.toString();
+        try {
+            start("runner_user", "cresco-run");
+            config("config_process", "stream_name", "long", "command", "sleep 300");
+            run("long");
+            Runner r = engine.get("long");
+            await(() -> r.isRunning() && descendants(r).stream().anyMatch(h -> h.info().command().orElse("").endsWith("sleep")),
+                    10_000, "sleep running under the stand-in sudo");
+            List<ProcessHandle> tree = descendants(r);
+            MsgEvent end = config("end_process", "stream_name", "long");
+            assertNotNull(end);
+            await(() -> tree.stream().noneMatch(ProcessHandle::isAlive), 10_000, "the runner's process tree killed");
+            String calls = java.nio.file.Files.readString(log);
+            assertTrue(calls.contains("-n -u cresco-run -- /bin/sh -c kill -KILL"), "killed through sudo as the runner user: " + calls);
+            await(() -> ended("long"), 10_000, "the runner reported ended");
+        } finally {
+            Runner.sudo = saved;
+        }
+    }
+
+    /** The same, for real, as another OS user: runs only where CRESCO_TEST_RUNNER_USER names one sudo -n can run. */
+    @Test
+    void endProcessKillsARealOtherUsersRunner() throws Exception {
+        String user = System.getenv("CRESCO_TEST_RUNNER_USER");
+        org.junit.jupiter.api.Assumptions.assumeTrue(user != null && !user.isEmpty(), "CRESCO_TEST_RUNNER_USER is not set");
+        Process probe = new ProcessBuilder("sudo", "-n", "-u", user, "--", "/bin/sh", "-c", "true").start();
+        org.junit.jupiter.api.Assumptions.assumeTrue(probe.waitFor() == 0, "sudo -n -u " + user + " /bin/sh is not allowed");
+        start("runner_user", user);
+        config("config_process", "stream_name", "other", "command", "sleep 300");
+        run("other");
+        Runner r = engine.get("other");
+        await(() -> descendants(r).stream().anyMatch(h -> h.info().command().orElse("").endsWith("sleep")), 10_000, "sleep as " + user);
+        List<ProcessHandle> tree = descendants(r);
+        config("end_process", "stream_name", "other");
+        await(() -> tree.stream().noneMatch(ProcessHandle::isAlive), 10_000, "the other user's process tree killed");
+        await(() -> ended("other"), 10_000, "the runner reported ended");
+    }
+
+    static List<ProcessHandle> descendants(Runner r) {
+        Process p = r.process();
+        List<ProcessHandle> out = new ArrayList<>();
+        if (p != null) p.descendants().forEach(out::add);
+        return out;
     }
 
     @Test

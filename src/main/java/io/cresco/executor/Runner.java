@@ -28,6 +28,15 @@ public class Runner implements Runnable {
     static final Pattern USER_NAME = Pattern.compile("[a-z_][a-z0-9_-]{0,31}");
     /** Bound on one write_stdin. */
     static final int MAX_STDIN_WRITE = 64 * 1024;
+    /**
+     * The launcher: a shell that stays the parent of a command shell, which reads the command from its stdin (a byte
+     * count on one line, then exactly that many bytes) and runs it, so the command is never in any process's arguments
+     * ({@code ps}) nor in sudo's log. What follows on stdin is the command's own stdin.
+     */
+    static final String LAUNCHER = "/bin/sh -c 'IFS= read -r n || exit 126; case $n in \"\"|*[!0-9]*) exit 126;; esac; "
+            + "c=$(dd bs=1 count=\"$n\" 2>/dev/null); eval \"$c\"' cresco-command; exit $?";
+    /** The sudo binary (tests replace it with a stand-in). */
+    static volatile String sudo = "sudo";
 
     private final PluginBuilder plugin;
     private final CLogger logger;
@@ -53,6 +62,8 @@ public class Runner implements Runnable {
     private volatile OutputStream stdinStream;
     // the exit code, once the process ended; for tests and status
     private volatile Integer exitCode;
+    // the OS user the launcher runs as (runner_user), or null for the agent's own user
+    private volatile String runAs;
 
     public Runner(PluginBuilder plugin, String command, String streamName, boolean metrics) {
         this(plugin, command, streamName, metrics, false);
@@ -62,6 +73,9 @@ public class Runner implements Runnable {
     public Runner(PluginBuilder plugin, String command, String streamName, boolean metrics, boolean stdin) {
         if (streamName == null || !STREAM_NAME.matcher(streamName).matches()) {
             throw new IllegalArgumentException("stream_name must match " + STREAM_NAME.pattern());
+        }
+        if (command == null || command.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException("command must be text without NUL characters");
         }
         this.plugin = plugin;
         logger = plugin.getLogger(Runner.class.getName(), CLogger.Level.Info);
@@ -93,45 +107,92 @@ public class Runner implements Runnable {
         return exitCode;
     }
 
+    /** The launched process (the launcher, or sudo), or null before launch (tests). */
+    Process process() {
+        return process;
+    }
+
     /**
-     * The directory the process starts in: {@code <runner_workdir>/<stream_name>}, created if absent. The name maps
-     * one to one (':' is the only character of a stream name a directory name may not keep, and becomes "%3A"; '%' is
-     * not a stream-name character), so two runners never share a directory.
+     * The directory the process starts in: {@code <runner_workdir>/<dirName(stream_name)>}, created if absent.
      */
     Path workDir() throws IOException {
         String base = plugin.getConfig().getStringParam("runner_workdir");
         Path root = base != null ? Paths.get(base) : Paths.get(plugin.getPluginDataDirectory(), "runners");
-        Path dir = root.toAbsolutePath().normalize().resolve(streamName.replace(":", "%3A"));
+        Path dir = root.toAbsolutePath().normalize().resolve(dirName(streamName));
         Files.createDirectories(dir);
         return dir;
     }
 
     /**
-     * The command line that runs {@code command}. A launcher shell runs the command as its child, so the command's
+     * A stream name as a directory name, one to one even where the filesystem ignores case (macOS, Windows): ':' and
+     * every upper-case letter become '%' and two lower-case hex digits ("Job" is "%4aob", "job:1" is "job%3a1"); '%' is
+     * not a stream-name character, and nothing else is upper case, so no two names share a directory.
+     */
+    static String dirName(String streamName) {
+        StringBuilder sb = new StringBuilder(streamName.length() + 8);
+        for (int i = 0; i < streamName.length(); i++) {
+            char c = streamName.charAt(i);
+            if (c == ':' || (c >= 'A' && c <= 'Z')) {
+                sb.append('%').append(Character.forDigit((c >> 4) & 0xF, 16)).append(Character.forDigit(c & 0xF, 16));
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
+    private static boolean windows() {
+        return System.getProperty("os.name").startsWith("Windows");
+    }
+
+    /** The configured runner_user, checked, or null for the agent's own user. */
+    String runnerUser() {
+        String user = plugin.getConfig().getStringParam("runner_user");
+        if (user == null || user.trim().isEmpty()) return null;
+        if (!USER_NAME.matcher(user.trim()).matches()) {
+            throw new IllegalStateException("runner_user must be an OS user name ([a-z_][a-z0-9_-]{0,31})");
+        }
+        return user.trim();
+    }
+
+    /**
+     * The command line that starts the launcher. A launcher shell runs the command as its child, so the command's
      * parent is the launcher (whose environment is the runner's own), never the agent JVM; with {@code runner_user} set,
-     * the launcher runs as that user through {@code sudo -n} (the agent's user needs a sudoers rule for it).
+     * the launcher runs as that user through {@code sudo -n} (the agent's user needs a sudoers rule allowing it to run
+     * /bin/sh as that user without a password). The command itself is not on this line: the launcher reads it from its
+     * stdin ({@link #LAUNCHER}), so neither {@code ps} nor sudo's log shows it.
      */
     List<String> commandLine() {
         List<String> cmd = new ArrayList<>();
-        if (System.getProperty("os.name").startsWith("Windows")) {
+        if (windows()) {
             if (isInteractive(command)) cmd.add("CMD");
             else Collections.addAll(cmd, "CMD", "/C", command);
             return cmd;
         }
-        String user = plugin.getConfig().getStringParam("runner_user");
-        if (user != null && !user.trim().isEmpty()) {
-            if (!USER_NAME.matcher(user.trim()).matches()) {
-                throw new IllegalStateException("runner_user must be an OS user name ([a-z_][a-z0-9_-]{0,31})");
-            }
-            Collections.addAll(cmd, "sudo", "-n", "-u", user.trim(), "--");
-        }
+        String user = runnerUser();
+        if (user != null) Collections.addAll(cmd, sudo, "-n", "-u", user, "--");
         // the trailing "exit" keeps the launcher from exec'ing into the command: it stays the command's parent
         if (isInteractive(command)) {
             Collections.addAll(cmd, "/bin/sh", "-c", "/bin/sh -i; exit $?", "cresco-runner");
         } else {
-            Collections.addAll(cmd, "/bin/sh", "-c", "/bin/sh -c \"$1\"; exit $?", "cresco-runner", command);
+            Collections.addAll(cmd, "/bin/sh", "-c", LAUNCHER, "cresco-runner");
         }
         return cmd;
+    }
+
+    /** What the launcher reads first on its stdin: the command's length in bytes, a newline, the command. */
+    byte[] launchHeader() {
+        byte[] c = command.getBytes(StandardCharsets.UTF_8);
+        byte[] n = (c.length + "\n").getBytes(StandardCharsets.US_ASCII);
+        byte[] out = new byte[n.length + c.length];
+        System.arraycopy(n, 0, out, 0, n.length);
+        System.arraycopy(c, 0, out, n.length, c.length);
+        return out;
+    }
+
+    /** True when the command goes to the launcher on its stdin (everywhere but Windows, and not an interactive shell). */
+    private boolean commandOnStdin() {
+        return !windows() && !isInteractive(command);
     }
 
     @Override
@@ -141,7 +202,9 @@ public class Runner implements Runnable {
             logger.debug("Running runner " + streamName);
             running = true;
 
-            ProcessBuilder pb = new ProcessBuilder(commandLine());
+            List<String> line = commandLine();
+            runAs = windows() ? null : runnerUser();
+            ProcessBuilder pb = new ProcessBuilder(line);
             pb.directory(workDir().toFile());
             String envMode = RunnerEnvironment.mode(plugin.getConfig().getStringParam("runner_env"));
             if (envMode == null) {
@@ -164,6 +227,12 @@ public class Runner implements Runnable {
                 mt.start();
             }
 
+            // the command, to the launcher, before anything else is written to its stdin
+            if (commandOnStdin()) {
+                OutputStream os = process.getOutputStream();
+                os.write(launchHeader());
+                os.flush();
+            }
             // stdin only through write_stdin, and only when asked for; otherwise EOF at once, so a command that reads
             // stdin never waits on a pipe nobody may write
             if (stdin) {
@@ -282,6 +351,13 @@ public class Runner implements Runnable {
         return started.compareAndSet(false, true);
     }
 
+    /**
+     * Kill the process and everything it started (its process tree as it is now). As the agent's own user the tree is
+     * killed directly. As {@code runner_user}, the agent may not signal that user's processes, nor sudo (which runs as
+     * root and does not relay SIGKILL): the tree's processes are killed as that user, with
+     * {@code sudo -n -u <user> /bin/sh -c 'kill -KILL ...'} (the same sudoers rule the launcher needs), and sudo exits
+     * when its child is gone. A process that left the tree (daemonized, re-parented to init) is not reached either way.
+     */
     public void shutdown() {
         logger.debug("Killing process " + streamName);
         try {
@@ -289,16 +365,50 @@ public class Runner implements Runnable {
             // re-run or racing process orphaned while stopRunner reported success
             Process p = this.process;
             if (p != null && p.isAlive()) {
-                // Kill the whole tree via the process handle we launched — no ps/grep/kill string
-                // interpolation (injection-safe) and no risk of killing an unrelated process.
-                p.descendants().forEach(ProcessHandle::destroyForcibly);
+                // the tree via the process handle we launched: no ps/grep, no string interpolation of names
+                List<ProcessHandle> tree = new ArrayList<>();
+                p.descendants().forEach(tree::add);
+                String user = runAs;
+                if (user != null) {
+                    killAs(user, tree);
+                } else {
+                    tree.forEach(ProcessHandle::destroyForcibly);
+                }
                 p.destroyForcibly();
+                if (user != null && !p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                    logger.error("runner " + streamName + " (runner_user " + user + ") did not exit after its process"
+                            + " tree was killed: check the sudoers rule allows /bin/sh as " + user);
+                }
                 // run()'s waitFor() unblocks; its finally closes stdin.
             } else {
                 running = false;
             }
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
         } catch (Exception e) {
             logger.error("shutdown() error for " + streamName + ": " + e.getMessage());
+        }
+    }
+
+    /** SIGKILL {@code tree} as {@code user}, through sudo; the pids are arguments, never shell text. */
+    private void killAs(String user, List<ProcessHandle> tree) throws IOException, InterruptedException {
+        if (tree.isEmpty()) return;
+        List<String> cmd = new ArrayList<>();
+        Collections.addAll(cmd, sudo, "-n", "-u", user, "--", "/bin/sh", "-c", "kill -KILL \"$@\" 2>/dev/null; exit 0",
+                "cresco-kill");
+        for (ProcessHandle h : tree) cmd.add(String.valueOf(h.pid()));
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        RunnerEnvironment.apply(pb.environment(), RunnerEnvironment.MINIMAL);
+        pb.redirectErrorStream(true);
+        pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+        pb.redirectInput(ProcessBuilder.Redirect.from(new File("/dev/null")));
+        Process k = pb.start();
+        if (!k.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
+            k.destroyForcibly();
+            logger.error("killing runner " + streamName + " as " + user + " did not finish in 10 s");
+        } else if (k.exitValue() != 0) {
+            logger.error("killing runner " + streamName + " as " + user + " failed (exit " + k.exitValue()
+                    + "): the sudoers rule must allow the agent's user to run /bin/sh as " + user + " without a password");
         }
     }
 }
