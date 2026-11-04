@@ -29,7 +29,7 @@ import java.util.UUID;
         why = "Begin execution and stream live output back over the mesh.",
         params = @CrescoParam(name = "stream_name", required = true, description = "runner id"),
         returns = @CrescoReturn(name = "status", description = "true on success")),
-    @CrescoAction(name = "write_stdin", type = "EXEC",
+    @CrescoAction(name = "write_stdin", type = "EXEC", roles = {"infra", "admin"},
         summary = "Write to a running runner's stdin (one line of text, or bytes).",
         why = "Drive a process that reads stdin, e.g. an interactive shell. Only the caller that started the runner, an admin or infra may write.",
         params = {
@@ -76,11 +76,12 @@ public class ExecutorImpl implements Executor {
 
 
     // explicit insecure development mode (broker_security_enabled=false on the agent): an unstamped caller is anonymous
-    private final boolean insecure = Callers.insecureMode();
+    private final boolean insecure;
 
     public ExecutorImpl(PluginBuilder pluginBuilder, RunnerEngine runnerEngine, ExecutorMetrics executorMetrics) {
         this.plugin = pluginBuilder;
         logger = plugin.getLogger(ExecutorImpl.class.getName(),CLogger.Level.Info);
+        insecure = Callers.insecureMode(plugin);
         this.runnerEngine = runnerEngine;
         this.executorMetrics = executorMetrics;
 

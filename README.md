@@ -46,7 +46,7 @@ All routed to the plugin instance (`region`/`agent`/`pluginid`).
 | `status_process` | CONFIG | default | `stream_name` | `run_status` | Is the runner currently running? |
 | `end_process` | CONFIG | **infra, admin** | `stream_name` | `end_status` | Kill the process (whole tree) and free the runner. |
 | `reset_runners` | CONFIG | **infra, admin** | — | `reset_status` | Stop every runner on this executor. |
-| `write_stdin` | EXEC | default + **starter, admin or infra** | `stream_name`, `data` (text; a newline follows unless `newline=false`) or `data_b64`, `close_stdin` (bool) | `status` (`10` written, `9` refused: `not-owner`, `no-stdin`, `not-running`) | Write to a running process's stdin. |
+| `write_stdin` | EXEC | **infra or admin** (the library's privileged floor), and of those only the **starter, an admin or infra** | `stream_name`, `data` (text; a newline follows unless `newline=false`) or `data_b64`, `close_stdin` (bool) | `status` (`10` written, `9` refused: `not-owner`, `no-stdin`, `not-running`) | Write to a running process's stdin. |
 | `getmetrics` | EXEC | default | — | `metrics` | Live `MeasurementEngine` gauges JSON (for the metric inventory). |
 | `getcapabilities` | EXEC | default | — | `capabilities` | Self-describing capability document. |
 

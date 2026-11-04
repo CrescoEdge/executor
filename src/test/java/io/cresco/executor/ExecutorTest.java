@@ -128,6 +128,7 @@ class ExecutorTest {
                         case "getAgentState": return state;
                         case "getCLogger": return log;
                         case "getAgentDataDirectory": return tmp.resolve("agent").toString();
+                        case "isSecurityEnabled": return true;
                         case "getDataPlaneService": return dp;
                         default: return dflt(m.getReturnType());
                     }
@@ -208,11 +209,13 @@ class ExecutorTest {
         for (CrescoAction a : ExecutorImpl.class.getAnnotationsByType(CrescoAction.class)) {
             roles.put(a.name(), new HashSet<>(Arrays.asList(a.roles())));
         }
-        for (String privileged : new String[]{"config_process", "run_process", "start_process", "end_process", "reset_runners"}) {
+        // write_stdin too (the library's privileged floor for this bundle); the executor itself admits, of those, only
+        // the runner's starter, an admin or infra
+        for (String privileged : new String[]{"config_process", "run_process", "start_process", "end_process", "reset_runners",
+                "write_stdin"}) {
             assertEquals(Set.of("infra", "admin"), roles.get(privileged), privileged);
         }
-        // write_stdin: open to the tenant at the door; the executor itself admits only the runner's starter, admin, infra
-        for (String open : new String[]{"status_process", "getmetrics", "getcapabilities", "write_stdin"}) {
+        for (String open : new String[]{"status_process", "getmetrics", "getcapabilities"}) {
             assertEquals(Set.of(), roles.get(open), open);
         }
         assertEquals(9, roles.size());
