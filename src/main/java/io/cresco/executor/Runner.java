@@ -5,38 +5,40 @@ import io.cresco.library.plugin.PluginBuilder;
 import io.cresco.library.utilities.CLogger;
 
 import jakarta.jms.MapMessage;
-import jakarta.jms.TextMessage;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.security.SecureRandom;
 import java.util.*;
 import java.util.regex.Pattern;
 
 /**
- * One configured command and, once started, its process. What the process can reach (see the README's "What a runner
- * can reach"): it runs as the agent's OS user through {@code /bin/sh -c} (or {@code CMD /C}), starting in its own
- * working directory ({@code <runner_workdir>/<stream_name>}, not a chroot), with the environment {@code runner_env}
- * allows (by default the agent's without its secrets), and stdin only when it was asked for, from writers that know
- * its stdin type.
+ * One configured command and, once started, its process. What the process can reach is in the README ("What a runner
+ * can reach"): it runs through a launcher shell (so its parent is the launcher, not the agent JVM), as the agent's OS
+ * user unless {@code runner_user} names another, starting in its own working directory, with the environment
+ * {@code runner_env} allows, and with stdin only when it was asked for, written through {@code write_stdin} by the
+ * caller that started it (or an admin or infra), never from the dataplane.
  */
 public class Runner implements Runnable {
 
     /** A stream name: it names a dataplane stream, a selector value and a directory. */
     static final Pattern STREAM_NAME = Pattern.compile("[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}");
-
-    private static final SecureRandom RANDOM = new SecureRandom();
+    /** An OS user name runner_user may name. */
+    static final Pattern USER_NAME = Pattern.compile("[a-z_][a-z0-9_-]{0,31}");
+    /** Bound on one write_stdin. */
+    static final int MAX_STDIN_WRITE = 64 * 1024;
 
     private final PluginBuilder plugin;
     private final CLogger logger;
     private final String command;
     private final String streamName;
     private final boolean metrics;
-    // the dataplane type stdin must carry to reach this process; null: no stdin (the process sees EOF)
-    private final String stdinType;
+    // does the process take stdin (write_stdin)? otherwise it sees EOF at once
+    private final boolean stdin;
     private final long drainMs;
+    // who started it (the verified caller's principal), for write_stdin; null for a runner the plugin's own config started
+    private volatile String startedBy;
 
     // read/written across threads (run thread, control thread) -> must be visible
     private volatile boolean running = false;
@@ -45,7 +47,8 @@ public class Runner implements Runnable {
     // first process orphaned and unkillable; the engine claims it exactly once via tryStart()
     private final java.util.concurrent.atomic.AtomicBoolean started =
             new java.util.concurrent.atomic.AtomicBoolean(false);
-    private volatile String listenerid;
+    private final Object stdinLock = new Object();
+    private volatile OutputStream stdinStream;
     // the exit code, once the process ended; for tests and status
     private volatile Integer exitCode;
 
@@ -53,10 +56,7 @@ public class Runner implements Runnable {
         this(plugin, command, streamName, metrics, false);
     }
 
-    /**
-     * @param stdin accept stdin over the dataplane (an interactive command always does): it must carry the type
-     *              {@link #getStdinType()}, which only the caller that configured the runner is told
-     */
+    /** @param stdin keep the process's stdin open for {@code write_stdin} (an interactive command always does) */
     public Runner(PluginBuilder plugin, String command, String streamName, boolean metrics, boolean stdin) {
         if (streamName == null || !STREAM_NAME.matcher(streamName).matches()) {
             throw new IllegalArgumentException("stream_name must match " + STREAM_NAME.pattern());
@@ -66,61 +66,80 @@ public class Runner implements Runnable {
         this.command = command;
         this.streamName = streamName;
         this.metrics = metrics;
-        boolean interactive = command.toLowerCase().contains("-interactive-");
-        if (stdin || interactive) {
-            if (plugin.getConfig().getBooleanParam("stdin_legacy_type", false)) {
-                // development only: any dataplane writer that knows the stream name can type into the process
-                logger.warn("stdin_legacy_type=true: " + streamName + " takes stdin from any writer of type=input");
-                this.stdinType = "input";
-            } else {
-                byte[] b = new byte[16];
-                RANDOM.nextBytes(b);
-                StringBuilder sb = new StringBuilder("input-");
-                for (byte x : b) sb.append(Character.forDigit((x >> 4) & 0xF, 16)).append(Character.forDigit(x & 0xF, 16));
-                this.stdinType = sb.toString();
-            }
-        } else {
-            this.stdinType = null;
-        }
+        this.stdin = stdin || isInteractive(command);
         this.drainMs = Math.max(0L, plugin.getConfig().getLongParam("drain_ms", 10_000L));
     }
 
-    /** The dataplane {@code type} stdin must carry, or null when the process takes no stdin. */
-    public String getStdinType() {
-        return stdinType;
+    static boolean isInteractive(String command) {
+        return command.toLowerCase(Locale.ROOT).contains("-interactive-");
+    }
+
+    /** True when the process takes stdin through write_stdin. */
+    public boolean takesStdin() {
+        return stdin;
+    }
+
+    void setStartedBy(String principal) {
+        this.startedBy = principal;
+    }
+
+    String getStartedBy() {
+        return startedBy;
     }
 
     Integer getExitCode() {
         return exitCode;
     }
 
-    /** The directory the process starts in: {@code <runner_workdir>/<stream_name>}, created if absent. */
+    /**
+     * The directory the process starts in: {@code <runner_workdir>/<stream_name>}, created if absent. The name maps
+     * one to one (':' is the only character of a stream name a directory name may not keep, and becomes "%3A"; '%' is
+     * not a stream-name character), so two runners never share a directory.
+     */
     Path workDir() throws IOException {
         String base = plugin.getConfig().getStringParam("runner_workdir");
         Path root = base != null ? Paths.get(base) : Paths.get(plugin.getPluginDataDirectory(), "runners");
-        Path dir = root.toAbsolutePath().normalize().resolve(streamName.replace(':', '_'));
+        Path dir = root.toAbsolutePath().normalize().resolve(streamName.replace(":", "%3A"));
         Files.createDirectories(dir);
         return dir;
+    }
+
+    /**
+     * The command line that runs {@code command}. A launcher shell runs the command as its child, so the command's
+     * parent is the launcher (whose environment is the runner's own), never the agent JVM; with {@code runner_user} set,
+     * the launcher runs as that user through {@code sudo -n} (the agent's user needs a sudoers rule for it).
+     */
+    List<String> commandLine() {
+        List<String> cmd = new ArrayList<>();
+        if (System.getProperty("os.name").startsWith("Windows")) {
+            if (isInteractive(command)) cmd.add("CMD");
+            else Collections.addAll(cmd, "CMD", "/C", command);
+            return cmd;
+        }
+        String user = plugin.getConfig().getStringParam("runner_user");
+        if (user != null && !user.trim().isEmpty()) {
+            if (!USER_NAME.matcher(user.trim()).matches()) {
+                throw new IllegalStateException("runner_user must be an OS user name ([a-z_][a-z0-9_-]{0,31})");
+            }
+            Collections.addAll(cmd, "sudo", "-n", "-u", user.trim(), "--");
+        }
+        // the trailing "exit" keeps the launcher from exec'ing into the command: it stays the command's parent
+        if (isInteractive(command)) {
+            Collections.addAll(cmd, "/bin/sh", "-c", "/bin/sh -i; exit $?", "cresco-runner");
+        } else {
+            Collections.addAll(cmd, "/bin/sh", "-c", "/bin/sh -c \"$1\"; exit $?", "cresco-runner", command);
+        }
+        return cmd;
     }
 
     @Override
     public void run() {
         StreamGobbler errorGobbler = null, outputGobbler = null;
         try {
-            logger.debug("Running Runner command: [" + command + "]");
+            logger.debug("Running runner " + streamName);
             running = true;
 
-            boolean isInteractive = command.toLowerCase().contains("-interactive-");
-            String osName = System.getProperty("os.name");
-            boolean windows = osName.startsWith("Windows");
-
-            ProcessBuilder pb;
-            if (isInteractive) {
-                pb = windows ? new ProcessBuilder("CMD") : new ProcessBuilder("/bin/sh", "-i");
-            } else {
-                pb = windows ? new ProcessBuilder("CMD", "/C", command)
-                             : new ProcessBuilder("/bin/sh", "-c", command);
-            }
+            ProcessBuilder pb = new ProcessBuilder(commandLine());
             pb.directory(workDir().toFile());
             String envMode = RunnerEnvironment.mode(plugin.getConfig().getStringParam("runner_env"));
             if (envMode == null) {
@@ -129,7 +148,8 @@ public class Runner implements Runnable {
             if (RunnerEnvironment.INHERIT.equals(envMode)) {
                 logger.warn("runner_env=inherit: " + streamName + " gets the agent's whole environment, secrets included");
             }
-            RunnerEnvironment.apply(pb.environment(), envMode);
+            RunnerEnvironment.apply(pb.environment(), envMode,
+                    RunnerEnvironment.extra(plugin.getConfig().getStringParam("runner_env_allow")));
 
             logger.trace("Starting process");
             process = pb.start();
@@ -142,10 +162,10 @@ public class Runner implements Runnable {
                 mt.start();
             }
 
-            // stdin over the dataplane only when asked for, and only of this runner's own type; otherwise EOF at once,
-            // so a command that reads stdin never waits on a pipe nobody may write
-            if (stdinType != null) {
-                createListener(process.getOutputStream(), streamName, stdinType);
+            // stdin only through write_stdin, and only when asked for; otherwise EOF at once, so a command that reads
+            // stdin never waits on a pipe nobody may write
+            if (stdin) {
+                stdinStream = process.getOutputStream();
             } else {
                 process.getOutputStream().close();
             }
@@ -158,6 +178,7 @@ public class Runner implements Runnable {
             int exitValue = process.waitFor();
             running = false;
             exitCode = exitValue;
+            closeStdin();
             logger.debug("Process " + streamName + " completed, exit=" + exitValue);
 
             // Forward everything the process wrote BEFORE saying it ended: a consumer tears the stream down on
@@ -200,52 +221,43 @@ public class Runner implements Runnable {
             logger.error("Runner.run() error for " + streamName + ": " + e.getMessage(), e);
         } finally {
             running = false;
-            removeListener();
+            closeStdin();
         }
     }
 
-    private void writeString(OutputStream os, String request) throws IOException {
-        // wrap without closing the process stdin; flush each line through
-        Writer bw = new BufferedWriter(new OutputStreamWriter(os, StandardCharsets.UTF_8));
-        bw.write(request);
-        bw.write("\r\n");
-        bw.flush();
-    }
+    /** Outcome of a write to stdin. */
+    enum StdinResult { WRITTEN, NO_STDIN, NOT_RUNNING, FAILED }
 
-    private boolean createListener(OutputStream os, String streamName, String streamType) {
-        try {
-            // both values are validated identifiers: nothing a caller sends can widen this selector
-            String stream_query = "stream_name='" + streamName + "' and type='" + streamType + "'";
-            jakarta.jms.MessageListener ml = msg -> {
-                try {
-                    if (msg instanceof TextMessage) {
-                        String message = ((TextMessage) msg).getText();
-                        logger.debug("stdin -> " + streamName + ": " + message);
-                        writeString(os, message);
-                    }
-                } catch (Exception ex) {
-                    logger.error("stdin listener error for " + streamName + ": " + ex.getMessage());
-                }
-            };
-            io.cresco.library.data.DataPlaneService dps = plugin.getAgentService().getDataPlaneService();
-            // stdin over the GLOBAL dataplane sharded by stream_name so an external client can feed it
-            listenerid = dps.addMessageListener(TopicType.GLOBAL, ml, stream_query, dps.shardFor(streamName));
-            return true;
-        } catch (Exception ex) {
-            logger.error("createListener error for " + streamName + ": " + ex.getMessage());
-            return false;
-        }
-    }
-
-    private void removeListener() {
-        String id = listenerid;
-        if (id != null) {
+    /** Write {@code data} to the process's stdin, then close it if {@code close}. */
+    StdinResult writeStdin(byte[] data, boolean close) {
+        if (!stdin) return StdinResult.NO_STDIN;
+        synchronized (stdinLock) {
+            OutputStream os = stdinStream;
+            if (os == null || !running) return StdinResult.NOT_RUNNING;
             try {
-                plugin.getAgentService().getDataPlaneService().removeMessageListener(id);
-            } catch (Exception ex) {
-                logger.error("removeListener error for " + streamName + ": " + ex.getMessage());
+                if (data != null && data.length > 0) {
+                    os.write(data);
+                    os.flush();
+                }
+                if (close) {
+                    os.close();
+                    stdinStream = null;
+                }
+                return StdinResult.WRITTEN;
+            } catch (IOException ex) {
+                logger.warn("stdin of " + streamName + " could not be written: " + ex.getMessage());
+                return StdinResult.FAILED;
             }
-            listenerid = null;
+        }
+    }
+
+    private void closeStdin() {
+        synchronized (stdinLock) {
+            OutputStream os = stdinStream;
+            stdinStream = null;
+            if (os != null) {
+                try { os.close(); } catch (IOException ignore) { }
+            }
         }
     }
 
@@ -269,7 +281,7 @@ public class Runner implements Runnable {
                 // interpolation (injection-safe) and no risk of killing an unrelated process.
                 p.descendants().forEach(ProcessHandle::destroyForcibly);
                 p.destroyForcibly();
-                // run()'s waitFor() unblocks; its finally removes the stdin listener.
+                // run()'s waitFor() unblocks; its finally closes stdin.
             } else {
                 running = false;
             }

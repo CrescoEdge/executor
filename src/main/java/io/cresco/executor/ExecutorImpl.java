@@ -6,12 +6,13 @@ import io.cresco.library.plugin.Executor;
 import io.cresco.library.plugin.PluginBuilder;
 import io.cresco.library.utilities.CLogger;
 
+import java.util.Base64;
 import java.util.UUID;
 
 @CrescoCapabilities(namespace = "executor", target = "plugin",
     routingParams = {"region", "agent", "pluginid"},
     summary = "Runs OS processes / shell commands (and containers via CLI) on an agent, streaming " +
-              "stdout/stderr over the dataplane (stream_name) and accepting stdin over the dataplane; " +
+              "stdout/stderr over the dataplane (stream_name) and accepting stdin through write_stdin; " +
               "optional per-process OSHI metrics.")
 @CrescoActions({
     @CrescoAction(name = "config_process", roles = {"infra", "admin"}, type = "CONFIG",
@@ -21,14 +22,23 @@ import java.util.UUID;
             @CrescoParam(name = "stream_name", required = true, description = "unique runner id + dataplane stdio stream_name"),
             @CrescoParam(name = "command", required = true, description = "shell command to run (e.g. 'tcpdump -w - port 514', 'docker run ...')"),
             @CrescoParam(name = "metrics", type = "boolean", description = "true to collect per-process OSHI metrics"),
-            @CrescoParam(name = "stdin", type = "boolean", description = "true to take stdin over the dataplane (an interactive command always does)")},
-        returns = {@CrescoReturn(name = "config_status", description = "true on success"),
-                   @CrescoReturn(name = "stdin_type", description = "the dataplane type stdin must carry (input_id), when stdin is taken")}),
+            @CrescoParam(name = "stdin", type = "boolean", description = "true to keep stdin open for write_stdin (an interactive command always does)")},
+        returns = @CrescoReturn(name = "config_status", description = "true on success")),
     @CrescoAction(name = "run_process", roles = {"infra", "admin"}, type = "EXEC",
         summary = "Start a configured runner; its stdout/stderr stream over the dataplane as stream_name.",
         why = "Begin execution and stream live output back over the mesh.",
         params = @CrescoParam(name = "stream_name", required = true, description = "runner id"),
         returns = @CrescoReturn(name = "status", description = "true on success")),
+    @CrescoAction(name = "write_stdin", type = "EXEC",
+        summary = "Write to a running runner's stdin (one line of text, or bytes).",
+        why = "Drive a process that reads stdin, e.g. an interactive shell. Only the caller that started the runner, an admin or infra may write.",
+        params = {
+            @CrescoParam(name = "stream_name", required = true, description = "runner id"),
+            @CrescoParam(name = "data", description = "text to write; a newline follows unless newline=false"),
+            @CrescoParam(name = "data_b64", description = "bytes to write, base64 (instead of data)"),
+            @CrescoParam(name = "newline", type = "boolean", description = "append a newline to data (default true)"),
+            @CrescoParam(name = "close_stdin", type = "boolean", description = "close stdin after writing (end of input)")},
+        returns = @CrescoReturn(name = "status", description = "10 written; 9 refused (see refusal); 8 bad params")),
     @CrescoAction(name = "start_process", roles = {"infra", "admin"}, type = "CONFIG",
         summary = "Start a configured runner (CONFIG channel variant of run_process).",
         why = "Begin execution of a prepared runner.",
@@ -64,6 +74,9 @@ public class ExecutorImpl implements Executor {
     private RunnerEngine runnerEngine;
     private ExecutorMetrics executorMetrics;
 
+
+    // explicit insecure development mode (broker_security_enabled=false on the agent): an unstamped caller is anonymous
+    private final boolean insecure = Callers.insecureMode();
 
     public ExecutorImpl(PluginBuilder pluginBuilder, RunnerEngine runnerEngine, ExecutorMetrics executorMetrics) {
         this.plugin = pluginBuilder;
@@ -109,8 +122,7 @@ public class ExecutorImpl implements Executor {
                                 incoming.setParam("error_msg", "runner not created for stream_name: " + streamName);
                                 incoming.setParam("config_status", Boolean.toString(false));
                             } else {
-                                // only the caller that configured the runner learns the type its stdin must carry
-                                if (r.getStdinType() != null) incoming.setParam("stdin_type", r.getStdinType());
+                                incoming.setParam("stdin", Boolean.toString(r.takesStdin()));
                                 incoming.setParam("config_status", Boolean.toString(true));
                             }
                         } else {
@@ -151,7 +163,7 @@ public class ExecutorImpl implements Executor {
 
                 if(streamName != null) {
                     if (runnerEngine.isRunner(streamName)) {
-                        incoming.setParam("start_status", Boolean.toString(runnerEngine.runRunner(streamName)));
+                        incoming.setParam("start_status", Boolean.toString(start(streamName, incoming)));
                     } else {
                         incoming.setParam("error_msg", "stream_name: " + streamName + " not found.");
                         incoming.setParam("start_status", Boolean.toString(false));
@@ -230,9 +242,11 @@ public class ExecutorImpl implements Executor {
                     incoming.setParam("error_msg", "Process is already running");
                     incoming.setParam("status", Boolean.toString(false));
                 } else {
-                    incoming.setParam("status", Boolean.toString(runnerEngine.runRunner(streamName)));
+                    incoming.setParam("status", Boolean.toString(start(streamName, incoming)));
                 }
                 return incoming;
+            case "write_stdin":
+                return writeStdin(incoming);
             case "getmetrics":
                 incoming.setParam("metrics", executorMetrics.getMetricsJson());
                 incoming.setParam("status", "10");
@@ -258,5 +272,82 @@ public class ExecutorImpl implements Executor {
         return null;
     }
 
+
+
+    /** Start a configured runner, recording who started it (the verified caller) for write_stdin. */
+    private boolean start(String streamName, MsgEvent incoming) {
+        Runner r = runnerEngine.get(streamName);
+        if (r != null) {
+            io.cresco.library.security.Caller c = Callers.of(incoming, insecure);
+            r.setStartedBy(c == null || c.isAnonymous() ? null : c.getPrincipal());
+        }
+        return runnerEngine.runRunner(streamName);
+    }
+
+    /**
+     * write_stdin: write to a running process's stdin. Only the verified caller that started the runner, or an admin
+     * or infra caller, may write; stdin never comes from the dataplane, where any member of the tenant could see and
+     * forge frames. With no verified caller the write is refused (development mode excepted).
+     */
+    private MsgEvent writeStdin(MsgEvent incoming) {
+        String streamName = incoming.getParam("stream_name");
+        Runner r = streamName == null ? null : runnerEngine.get(streamName);
+        if (r == null) {
+            incoming.setParam("status", "8");
+            incoming.setParam("status_desc", "no runner for stream_name " + streamName);
+            return incoming;
+        }
+        io.cresco.library.security.Caller c = Callers.of(incoming, insecure);
+        boolean allowed = c != null && (Callers.hasRole(c, "admin") || Callers.hasRole(c, "infra")
+                || (r.getStartedBy() != null && r.getStartedBy().equals(c.getPrincipal())));
+        if (!allowed) {
+            logger.warn("write_stdin to " + streamName + " refused for " + (c == null ? "an unverified caller" : c));
+            incoming.setParam("status", "9");
+            incoming.setParam("status_desc", "refused: only the caller that started the runner, an admin or infra may write its stdin");
+            incoming.setParam("refusal", "not-owner");
+            return incoming;
+        }
+        byte[] data;
+        try {
+            if (incoming.getParam("data_b64") != null) {
+                data = Base64.getDecoder().decode(incoming.getParam("data_b64"));
+            } else {
+                String text = incoming.getParam("data");
+                if (text == null) text = "";
+                if (!"false".equalsIgnoreCase(incoming.getParam("newline")) && incoming.getParam("data") != null) text = text + "\n";
+                data = text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            }
+        } catch (IllegalArgumentException bad) {
+            incoming.setParam("status", "8");
+            incoming.setParam("status_desc", "data_b64 is not base64");
+            return incoming;
+        }
+        if (data.length > Runner.MAX_STDIN_WRITE) {
+            incoming.setParam("status", "8");
+            incoming.setParam("status_desc", "at most " + Runner.MAX_STDIN_WRITE + " bytes per write_stdin");
+            return incoming;
+        }
+        Runner.StdinResult res = r.writeStdin(data, "true".equalsIgnoreCase(incoming.getParam("close_stdin")));
+        switch (res) {
+            case WRITTEN:
+                incoming.setParam("status", "10");
+                incoming.setParam("status_desc", "written");
+                break;
+            case NO_STDIN:
+                incoming.setParam("status", "9");
+                incoming.setParam("status_desc", "this runner takes no stdin (config_process stdin=true)");
+                incoming.setParam("refusal", "no-stdin");
+                break;
+            case NOT_RUNNING:
+                incoming.setParam("status", "9");
+                incoming.setParam("status_desc", "the process is not running, or its stdin is closed");
+                incoming.setParam("refusal", "not-running");
+                break;
+            default:
+                incoming.setParam("status", "7");
+                incoming.setParam("status_desc", "stdin could not be written");
+        }
+        return incoming;
+    }
 
 }

@@ -150,6 +150,21 @@ class ExecutorTest {
         return exec.executeEXEC(m);
     }
 
+    /** Stamp {@code m} as infrastructure would: {@code principal} of tenant-a holding {@code roles}. */
+    static MsgEvent as(MsgEvent m, String principal, String roles) {
+        m.setParam("cresco_caller", principal);
+        m.setParam("cresco_caller_tenant", "tenant-a");
+        m.setParam("cresco_caller_roles", roles);
+        return m;
+    }
+
+    MsgEvent exec(String action, String... kv) {
+        MsgEvent m = new MsgEvent(MsgEvent.Type.EXEC, "region-1", "agent-1", null, "region-1", "agent-1", "plugin-0", false, false);
+        m.setParam("action", action);
+        for (int i = 0; i + 1 < kv.length; i += 2) m.setParam(kv[i], kv[i + 1]);
+        return m;
+    }
+
     static void await(BooleanSupplier cond, long ms, String what) throws Exception {
         long deadline = System.currentTimeMillis() + ms;
         while (!cond.getAsBoolean()) {
@@ -190,10 +205,11 @@ class ExecutorTest {
         for (String privileged : new String[]{"config_process", "run_process", "start_process", "end_process", "reset_runners"}) {
             assertEquals(Set.of("infra", "admin"), roles.get(privileged), privileged);
         }
-        for (String open : new String[]{"status_process", "getmetrics", "getcapabilities"}) {
+        // write_stdin: open to the tenant at the door; the executor itself admits only the runner's starter, admin, infra
+        for (String open : new String[]{"status_process", "getmetrics", "getcapabilities", "write_stdin"}) {
             assertEquals(Set.of(), roles.get(open), open);
         }
-        assertEquals(8, roles.size());
+        assertEquals(9, roles.size());
     }
 
     // ------------------------------------------------------------------ the output tail (Runner's drain)
@@ -242,14 +258,20 @@ class ExecutorTest {
     }
 
     @Test
-    void theAgentsSecretsAreNotInARunnersEnvironment() {
+    void aRunnersEnvironmentIsAnAllowlist() {
         Map<String, String> env = new HashMap<>();
-        for (String k : new String[]{"PATH", "HOME", "LANG", "LC_ALL", "SSH_AUTH_SOCK", "CRESCO_keystorepwd",
+        for (String k : new String[]{"PATH", "HOME", "LANG", "LC_ALL", "USER", "SSH_AUTH_SOCK", "CRESCO_keystorepwd",
                 "CRESCO_BROKER_SECURITY_SECRET_FILE", "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "DB_PASSWORD", "SIGNING_KEY",
-                "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "GPG_PASSPHRASE", "SIM_PIN"}) env.put(k, "v");
+                "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "JAVA_OPTS", "CATALINA_OPTS", "GPG_PASSPHRASE",
+                "SIM_PIN", "DB_PASSWD", "MYSQL_PWD", "SOMETHING_NEW"}) env.put(k, "v");
         Map<String, String> scrubbed = new HashMap<>(env);
         RunnerEnvironment.apply(scrubbed, RunnerEnvironment.SCRUBBED);
-        assertEquals(Set.of("PATH", "HOME", "LANG", "LC_ALL", "SSH_AUTH_SOCK"), scrubbed.keySet());
+        assertEquals(Set.of("PATH", "HOME", "LANG", "LC_ALL", "USER"), scrubbed.keySet(), "only what the allowlist names");
+        // an admin may add names, never a secret-carrying one
+        Map<String, String> allowed = new HashMap<>(env);
+        RunnerEnvironment.apply(allowed, RunnerEnvironment.SCRUBBED,
+                RunnerEnvironment.extra("SSH_AUTH_SOCK, DB_PASSWORD, CRESCO_keystorepwd, JAVA_OPTS, MYSQL_PWD, bad-name"));
+        assertEquals(Set.of("PATH", "HOME", "LANG", "LC_ALL", "USER", "SSH_AUTH_SOCK"), allowed.keySet());
         Map<String, String> minimal = new HashMap<>(env);
         RunnerEnvironment.apply(minimal, RunnerEnvironment.MINIMAL);
         assertEquals(Set.of("PATH", "HOME", "LANG", "LC_ALL"), minimal.keySet());
@@ -261,6 +283,29 @@ class ExecutorTest {
     }
 
     @Test
+    void theCommandRunsUnderALauncherAndOptionallyAsAnotherUser() throws Exception {
+        start();
+        Runner r = new Runner(plugin, "echo hi", "launch", false);
+        List<String> line = r.commandLine();
+        assertEquals(List.of("/bin/sh", "-c", "/bin/sh -c \"$1\"; exit $?", "cresco-runner", "echo hi"), line);
+        // the command's parent is the launcher shell, not this JVM
+        config("config_process", "stream_name", "ppid", "command", "ps -o comm= -p $PPID");
+        run("ppid");
+        await(() -> ended("ppid"), 10_000, "ps");
+        List<String> out = output("ppid");
+        assertEquals(1, out.size(), out.toString());
+        assertTrue(out.get(0).trim().endsWith("sh"), "the parent is the launcher shell: " + out);
+        plugin.close();
+        start("runner_user", "cresco-run");
+        assertEquals(List.of("sudo", "-n", "-u", "cresco-run", "--", "/bin/sh", "-c", "/bin/sh -c \"$1\"; exit $?",
+                "cresco-runner", "echo hi"), new Runner(plugin, "echo hi", "launch", false).commandLine());
+        plugin.close();
+        start("runner_user", "root; rm -rf /");
+        Runner bad = new Runner(plugin, "echo hi", "launch", false);
+        assertThrows(IllegalStateException.class, bad::commandLine);
+    }
+
+    @Test
     void aMinimalEnvironmentReallyIsMinimal() throws Exception {
         start("runner_env", "minimal");
         config("config_process", "stream_name", "env", "command", "env");
@@ -269,43 +314,52 @@ class ExecutorTest {
         for (String line : output("env")) {
             String name = line.substring(0, Math.max(0, line.indexOf('=')));
             if (name.isEmpty()) continue;
-            assertTrue(Set.of("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TZ", "TMPDIR", "TERM", "PWD", "SHLVL", "_",
-                    "OLDPWD").contains(name) || name.startsWith("LC_"), "unexpected variable " + name);
+            assertTrue(Set.of("PATH", "HOME", "LANG", "TZ", "PWD", "SHLVL", "_", "OLDPWD").contains(name)
+                    || name.startsWith("LC_"), "unexpected variable " + name);
         }
     }
 
     @Test
-    void stdinIsTakenOnlyWhenAskedForAndOnlyOfTheRunnersOwnType() throws Exception {
+    void stdinIsWrittenOnlyByTheStarterAnAdminOrInfraAndNeverFromTheDataplane() throws Exception {
         start();
-        // no stdin: the process sees EOF at once, so cat ends by itself
-        MsgEvent plain = config("config_process", "stream_name", "nostdin", "command", "cat");
-        assertNull(plain.getParam("stdin_type"));
-        run("nostdin");
+        // no stdin: the process sees EOF at once, so cat ends by itself; a write is refused
+        config("config_process", "stream_name", "nostdin", "command", "cat");
+        exec.executeEXEC(as(exec("run_process", "stream_name", "nostdin"), "api:tenant-a/alice", "user"));
         await(() -> ended("nostdin"), 10_000, "cat ended on EOF");
+        assertEquals("no-stdin", exec.executeEXEC(as(exec("write_stdin", "stream_name", "nostdin", "data", "x"), "api:tenant-a/alice", "user"))
+                .getParam("refusal"), "a runner configured without stdin takes none");
+        assertEquals("8", exec.executeEXEC(as(exec("write_stdin", "stream_name", "nosuch", "data", "x"), "api:tenant-a/alice", "user"))
+                .getParam("status"));
 
-        MsgEvent r = config("config_process", "stream_name", "withstdin", "command", "cat", "stdin", "true");
-        String type = r.getParam("stdin_type");
-        assertNotNull(type);
-        assertTrue(type.matches("input-[0-9a-f]{32}"), type);
-        run("withstdin");
-        await(() -> listeners.values().stream().anyMatch(l -> ((String) l[0]).contains(type)), 10_000, "the stdin listener");
-        // a writer that only knows the stream name: ignored
-        TextMessage guess = FakeJms.text();
-        guess.setStringProperty("stream_name", "withstdin");
-        guess.setStringProperty("type", "input");
-        guess.setText("injected");
-        publish(guess);
-        // the caller that configured it
-        TextMessage owner = FakeJms.text();
-        owner.setStringProperty("stream_name", "withstdin");
-        owner.setStringProperty("type", type);
-        owner.setText("from the owner");
-        publish(owner);
+        assertEquals("true", config("config_process", "stream_name", "withstdin", "command", "cat", "stdin", "true").getParam("config_status"));
+        assertEquals("true", exec.executeEXEC(as(exec("run_process", "stream_name", "withstdin"), "api:tenant-a/alice", "user")).getParam("status"));
+        await(() -> engine.isRunning("withstdin"), 10_000, "running");
+        Thread.sleep(200);
+        // no dataplane listener takes stdin any more: a frame of any type reaches nothing
+        assertTrue(listeners.isEmpty(), "no stdin listener on the dataplane");
+        TextMessage frame = FakeJms.text();
+        frame.setStringProperty("stream_name", "withstdin");
+        frame.setStringProperty("type", "input");
+        frame.setText("from the dataplane");
+        publish(frame);
+        // another user, and an unverified caller: refused
+        MsgEvent bob = exec.executeEXEC(as(exec("write_stdin", "stream_name", "withstdin", "data", "from bob"), "api:tenant-a/bob", "user"));
+        assertEquals("not-owner", bob.getParam("refusal"));
+        assertEquals("not-owner", exec.executeEXEC(exec("write_stdin", "stream_name", "withstdin", "data", "unstamped")).getParam("refusal"));
+        MsgEvent forged = exec("write_stdin", "stream_name", "withstdin", "data", "forged");
+        forged.setParam("cresco_caller", "api:tenant-a/alice");      // a malformed stamp (no tenant, no roles)
+        assertEquals("not-owner", exec.executeEXEC(forged).getParam("refusal"));
+        // the starter, and an admin
+        assertEquals("10", exec.executeEXEC(as(exec("write_stdin", "stream_name", "withstdin", "data", "from alice"), "api:tenant-a/alice", "user")).getParam("status"));
+        assertEquals("10", exec.executeEXEC(as(exec("write_stdin", "stream_name", "withstdin", "data", "from an admin"), "api:tenant-a/root", "admin")).getParam("status"));
         await(() -> {
-            try { return output("withstdin").contains("from the owner"); } catch (Exception e) { return false; }
-        }, 10_000, "the owner's line echoed");
-        assertFalse(output("withstdin").contains("injected"));
-        assertEquals("true", config("end_process", "stream_name", "withstdin").getParam("end_status"));
+            try { return output("withstdin").containsAll(List.of("from alice", "from an admin")); } catch (Exception e) { return false; }
+        }, 10_000, "the allowed lines echoed");
+        // end of input: cat exits by itself
+        assertEquals("10", exec.executeEXEC(as(exec("write_stdin", "stream_name", "withstdin", "close_stdin", "true"), "api:tenant-a/alice", "user")).getParam("status"));
+        await(() -> ended("withstdin"), 10_000, "cat ended on the closed stdin");
+        List<String> out = output("withstdin");
+        assertFalse(out.contains("from the dataplane") || out.contains("from bob") || out.contains("unstamped") || out.contains("forged"), out.toString());
     }
 
     @Test
