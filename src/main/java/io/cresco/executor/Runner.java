@@ -451,10 +451,10 @@ public class Runner implements Runnable {
         return out;
     }
 
-    /** SIGKILL the process groups {@code groups} as {@code user}, through sudo ({@code kill -KILL -- -<pgid>}). */
+    /** SIGKILL the process groups {@code groups} as {@code user}, through sudo ({@code kill -s KILL -- -<pgid>}). */
     private void killGroupsAs(String user, List<Long> groups) throws IOException, InterruptedException {
         List<String> cmd = new ArrayList<>();
-        Collections.addAll(cmd, sudo, "-n", "-u", user, "--", "/bin/sh", "-c", "kill -KILL -- \"$@\" 2>/dev/null; exit 0",
+        Collections.addAll(cmd, sudo, "-n", "-u", user, "--", "/bin/sh", "-c", "kill -s KILL -- \"$@\" 2>/dev/null; exit 0",
                 "cresco-kill");
         for (Long g : groups) cmd.add("-" + g);
         runKill(user, cmd);

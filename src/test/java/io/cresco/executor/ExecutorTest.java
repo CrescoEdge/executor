@@ -473,7 +473,7 @@ class ExecutorTest {
 
     /**
      * Where setsid exists the runner leads its own process group, and end_process kills that GROUP as the runner user
-     * (kill -KILL -- -pgid): a group id is never reused while the group lives, so no other process can be hit. Here a
+     * (kill -s KILL -- -pgid): a group id is never reused while the group lives, so no other process can be hit. Here a
      * stand-in setsid (perl's POSIX::setsid) gives macOS the same; the command starts two processes.
      */
     @Test
@@ -499,7 +499,7 @@ class ExecutorTest {
             config("end_process", "stream_name", "grp");
             await(() -> tree.stream().noneMatch(ProcessHandle::isAlive), 10_000, "the runner's process group killed");
             String calls = java.nio.file.Files.readString(log);
-            assertTrue(calls.matches("(?s).*kill -KILL -- \"\\$@\" 2>/dev/null; exit 0 cresco-kill -[0-9]+.*"),
+            assertTrue(calls.matches("(?s).*kill -s KILL -- \"\\$@\" 2>/dev/null; exit 0 cresco-kill -[0-9]+.*"),
                     "killed as a process group: " + calls);
             await(() -> ended("grp"), 10_000, "the runner reported ended");
         } finally {
